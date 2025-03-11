@@ -1,0 +1,18 @@
+[package]
+name = "http-cache-stream-reqwest"
+version = "0.1.0"
+description = "A caching middleware for reqwest that supports streaming bodies."
+edition = { workspace = true }
+license = { workspace = true }
+authors = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+
+[dependencies]
+http-cache-stream = { path = "../.." }
+anyhow = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
+reqwest-middleware = { workspace = true }
+futures = { workspace = true }
+bytes = { workspace = true }
+pin-project-lite = { workspace = true }
