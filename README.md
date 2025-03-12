@@ -14,7 +14,7 @@
   </p>
 
   <p align="center">
-    A streaming caching middleware for that uses <a href="https://github.com/kornelski/rusty-http-cache-semantics">http-cache-semantics</a>.
+    A HTTP caching middleware that supports streaming bodies and uses <a href="https://github.com/kornelski/rusty-http-cache-semantics">http-cache-semantics</a>.
     <br />
     <a href="https://docs.rs/http-cache-stream"><strong>Explore the docs »</strong></a>
     <br />
