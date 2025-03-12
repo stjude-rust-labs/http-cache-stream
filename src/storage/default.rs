@@ -231,7 +231,6 @@ impl CacheStorage for DefaultCacheStorage {
         };
 
         // Check to see if the entry is valid
-        // A valid entry would have a lock file of exactly 1 byte in size
         let mut marker = String::new();
         lock.read_to_string(&mut marker)
             .with_context(|| format!("failed to read lock file for entry `{key}`"))?;
