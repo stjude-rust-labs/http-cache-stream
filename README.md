@@ -30,9 +30,26 @@
 
 ## Getting started
 
-TODO: complete this document
+TODO: complete this section
 
-## How this crate differs from [`http-stream`][http-stream]
+## How this crate differs from [`http-cache`][http-cache]
+
+The [`http-cache`][http-cache] crate is a highly-configurable HTTP cache that
+supports different storage backends and middleware for many popular Rust HTTP
+client APIs.
+
+The `http-cache-stream` crate is inspired by the implementation provided by
+`http-cache`, but differs in significant ways:
+
+* `http-cache-stream` supports streaming of requests/responses and does not
+  read a response body into memory to store in the cache.
+* The default storage implementation for `http-cache-stream` uses advisory file
+  locking to coordinate access to storage across multiple processes and threads.
+* The default storage implementation is simple and provides no integrity of
+  cached bodies, but does provide some fault tolerance for writes to cache
+  storage (i.e. partially written cache entries are discarded).
+* The API for `http-cache-stream` is not nearly as configurable as `http-cache`.
+* Only a middleware implementation for `reqwest` will be made initially.
 
 ## Development
 
@@ -60,10 +77,10 @@ following checks (from the root directory).
 
 ```bash
 # Run the project's tests with tokio as the async runtime.
-cargo test --no-default-features --features tokio
+cargo test
 
-# Run the project's tests with async-std as the async runtime.
-cargo test --no-default-features --features async-std
+# Run the reqwest middleware tests
+cargo test -p http-cache-stream-reqwest
 
 # Ensure the project doesn't have any linting warnings.
 cargo clippy --all
@@ -89,4 +106,4 @@ This project is licensed under the [Apache 2.0][license] license.
 Copyright © 2025-Present [Peter Huene](https://github.com/peterhuene).
 
 [license]: https://github.com/peterhuene/http-cache-stream/blob/main/LICENSE
-[http-stream]: https://github.com/06chaynes/http-cache
+[http-cache]: https://github.com/06chaynes/http-cache
