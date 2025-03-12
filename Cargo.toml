@@ -31,13 +31,15 @@ http-body = "1.0.1"
 bytes = "1.10.1"
 pin-project-lite = "0.2.16"
 cfg-if = "1.0.0"
-reqwest = { version = "0.12.12", default-features = false }
+# TODO: remove the fixed dependency version once https://github.com/seanmonstar/reqwest/issues/2596 is resolved
+reqwest = { version = "=0.12.12", default-features = false }
 reqwest-middleware = "0.4.1"
 
 [package]
 name = "http-cache-stream"
 version = "0.1.0"
 description = "A HTTP cache implementation for streaming bodies."
+rust-version = "1.85.0"
 edition = { workspace = true }
 license = { workspace = true }
 authors = { workspace = true }
