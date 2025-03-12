@@ -153,7 +153,7 @@ impl<B: HttpBody> http_body::Body for Body<B> {
                         let slice =
                             unsafe { std::slice::from_raw_parts_mut(chunk.as_mut_ptr(), chunk.len()) };
                         match file.poll_read(cx, slice) {
-                            Poll::Ready(Ok(n)) if n == 0 => {
+                            Poll::Ready(Ok(0)) => {
                                 *finished = true;
                                 Poll::Ready(None)
                             }

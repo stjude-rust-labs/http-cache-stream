@@ -72,7 +72,7 @@ pub fn error_unsupported(err: &Error) -> bool {
 }
 
 /// Downgrades a lock
-pub fn downgrade(file: &impl AsRawFd) -> Result<()> {
+pub fn downgrade(file: &impl AsRawHandle) -> Result<()> {
     // From https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex
     //
     // Exclusive locks cannot overlap an existing locked region of a file. Shared
