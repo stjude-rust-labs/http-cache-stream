@@ -19,7 +19,7 @@
 //! ```
 //!
 //! [reqwest]: https://github.com/seanmonstar/reqwest
-//! [http-cache-stream]: https://github.com/peterhuene/http-cache-stream
+//! [http-cache-stream]: https://github.com/stjude-rust-labs/http-cache-stream
 
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
