@@ -5,11 +5,11 @@ members = [
 ]
 
 [workspace.package]
-license = "Apache-2.0"
+license = "MIT OR Apache-2.0"
 edition = "2024"
-authors = ["Peter Huene <peter@huene.dev>"]
-homepage = "https://github.com/peterhuene/http-cache-stream"
-repository = "https://github.com/peterhuene/http-cache-stream"
+authors = ["The St. Jude Rust Labs project developers"]
+homepage = "https://github.com/stjude-rust-labs/http-cache-stream"
+repository = "https://github.com/stjude-rust-labs/http-cache-stream"
 
 [workspace.dependencies]
 http = "1.2.0"

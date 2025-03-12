@@ -4,8 +4,8 @@
   </h1>
 
   <p align="center">
-    <a href="https://github.com/peterhuene/http-cache-stream/actions/workflows/CI.yml" target="_blank">
-      <img alt="CI: Status" src="https://github.com/peterhuene/http-cache-stream/actions/workflows/CI.yml/badge.svg" />
+    <a href="https://github.com/stjude-rust-labs/http-cache-stream/actions/workflows/CI.yml" target="_blank">
+      <img alt="CI: Status" src="https://github.com/stjude-rust-labs/http-cache-stream/actions/workflows/CI.yml/badge.svg" />
     </a>
     <a href="https://crates.io/crates/http-cache-stream" target="_blank">
       <img alt="crates.io version" src="https://img.shields.io/crates/v/http-cache-stream">
@@ -19,9 +19,9 @@
     <a href="https://docs.rs/http-cache-stream"><strong>Explore the docs »</strong></a>
     <br />
     <br />
-    <a href="https://github.com/peterhuene/http-cache-stream/issues/new?assignees=&title=Descriptive%20Title&labels=enhancement">Request Feature</a>
+    <a href="https://github.com/stjude-rust-labs/http-cache-stream/issues/new?assignees=&title=Descriptive%20Title&labels=enhancement">Request Feature</a>
     ·
-    <a href="https://github.com/peterhuene/http-cache-stream/issues/new?assignees=&title=Descriptive%20Title&labels=bug">Report Bug</a>
+    <a href="https://github.com/stjude-rust-labs/http-cache-stream/issues/new?assignees=&title=Descriptive%20Title&labels=bug">Report Bug</a>
     ·
     ⭐ Consider starring the repo! ⭐
     <br />
@@ -57,7 +57,7 @@ To bootstrap a development environment, please use the following commands.
 
 ```bash
 # Clone the repository
-git clone git@github.com:peterhuene/http-cache-stream.git
+git clone git@github.com:stjude-rust-labs/http-cache-stream.git
 cd http-cache-stream
 
 # Build the crate
@@ -101,9 +101,13 @@ Please submit your changes as pull requests from a feature branch of your fork.
 
 ## License and Legal
 
-This project is licensed under the [Apache 2.0][license] license.
+This project is licensed as either [Apache 2.0][license-apache] or
+[MIT][license-mit] at your discretion. Additionally, please see [the
+disclaimer](https://github.com/stjude-rust-labs#disclaimer) that applies to all
+crates and command line tools made available by St. Jude Rust Labs.
 
-Copyright © 2025-Present [Peter Huene](https://github.com/peterhuene).
+Copyright © 2025-Present [St. Jude Children's Research Hospital](https://github.com/stjude).
 
-[license]: https://github.com/peterhuene/http-cache-stream/blob/main/LICENSE
+[license-apache]: https://github.com/stjude-rust-labs/http-cache-stream/blob/main/LICENSE-APACHE
+[license-mit]: https://github.com/stjude-rust-labs/http-cache-stream/blob/main/LICENSE-MIT
 [http-cache]: https://github.com/06chaynes/http-cache
