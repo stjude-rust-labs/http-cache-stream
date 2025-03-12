@@ -309,8 +309,8 @@ where
         let method = request.method();
         let uri = request.uri();
 
+        let key = storage_key(method, uri);
         if matches!(*method, Method::GET | Method::HEAD) {
-            let key = storage_key(method, uri);
             match self.storage.get(&key).await {
                 Ok(Some((response, policy))) => {
                     debug!(
@@ -351,7 +351,8 @@ where
             }
         }
 
-        self.send_upstream(request, CacheLookupStatus::Miss).await
+        self.send_upstream(key, request, CacheLookupStatus::Miss)
+            .await
     }
 
     /// Sends the original request upstream.
@@ -359,6 +360,7 @@ where
     /// Caches the response if the response is cacheable.
     async fn send_upstream<B: HttpBody>(
         &self,
+        key: String,
         request: impl Request<B>,
         lookup_status: CacheLookupStatus,
     ) -> Result<Response<Body<B>>> {
@@ -370,7 +372,6 @@ where
 
         response.set_cache_status(lookup_status, CacheStatus::Miss);
 
-        let key = storage_key(&request_like.method, &request_like.uri);
         if matches!(request_like.method, Method::GET | Method::HEAD)
             && response.status() == StatusCode::OK
             && policy.is_storable()
