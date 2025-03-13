@@ -6,6 +6,8 @@ use std::task::Context;
 use std::task::Poll;
 
 use anyhow::Result;
+use blake3::Hash;
+use blake3::Hasher;
 use bytes::Bytes;
 use bytes::BytesMut;
 use futures::Stream;
@@ -13,11 +15,69 @@ use http_body::Frame;
 use pin_project_lite::pin_project;
 
 use crate::HttpBody;
-use crate::lock::LockedFile;
 use crate::runtime;
 
 /// The default capacity for reading from files.
 const DEFAULT_CAPACITY: usize = 4096;
+
+pin_project! {
+    /// A wrapper around a byte stream that performs a Blake3 hash on the stream data.
+    struct HashStream<S> {
+        #[pin]
+        stream: S,
+        hasher: Hasher,
+        finished: bool,
+    }
+}
+
+impl<S> HashStream<S> {
+    /// Constructs a new hash stream.
+    fn new(stream: S) -> Self
+    where
+        S: Stream<Item = io::Result<Bytes>>,
+    {
+        Self {
+            stream,
+            hasher: Hasher::new(),
+            finished: false,
+        }
+    }
+
+    /// Computes the hash of the byte stream.
+    fn hash(self) -> Hash {
+        self.hasher.finalize()
+    }
+}
+
+impl<S> Stream for HashStream<S>
+where
+    S: Stream<Item = io::Result<Bytes>>,
+{
+    type Item = io::Result<Bytes>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.finished {
+            return Poll::Ready(None);
+        }
+
+        let this = self.project();
+        match this.stream.poll_next(cx) {
+            Poll::Ready(Some(Ok(bytes))) => {
+                this.hasher.update(&bytes);
+                Poll::Ready(Some(Ok(bytes)))
+            }
+            Poll::Ready(Some(Err(e))) => {
+                *this.finished = true;
+                Poll::Ready(Some(Err(e)))
+            }
+            Poll::Ready(None) => {
+                *this.finished = true;
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
 
 pin_project! {
     /// Represents the source of a response body.
@@ -28,9 +88,8 @@ pin_project! {
             #[pin]
             body: B,
         },
-        /// The body is coming from the cache.
-        Cached {
-            lock: LockedFile,
+        /// The body is coming from a local file.
+        File {
             #[pin]
             file: runtime::File,
             len: u64,
@@ -43,7 +102,7 @@ pin_project! {
 pin_project! {
     /// Represents a response body from the HTTP cache.
     ///
-    /// The response body may be from upstream or from a cache file.
+    /// The response body may be from upstream or from a local file.
     pub struct Body<B> {
         #[pin]
         source: Source<B>,
@@ -51,13 +110,12 @@ pin_project! {
 }
 
 impl<B: HttpBody> Body<B> {
-    /// Constructs a new body from the cache.
-    pub(crate) async fn from_cache(lock: LockedFile, file: runtime::File) -> Result<Self> {
+    /// Constructs a new body from a local file.
+    pub(crate) async fn from_file(file: runtime::File) -> Result<Self> {
         let metadata = file.metadata().await?;
 
         Ok(Self {
-            source: Source::Cached {
-                lock,
+            source: Source::File {
                 file,
                 len: metadata.len(),
                 buf: BytesMut::new(),
@@ -76,21 +134,27 @@ impl<B: HttpBody> Body<B> {
     /// Writes the body to the given file.
     ///
     /// Trailers in the body are not stored.
-    pub(crate) async fn write_to(self, file: &mut runtime::File) -> io::Result<()> {
+    ///
+    /// Returns the calculated Blake3 hash of the body.
+    pub(crate) async fn write_to(self, file: &mut runtime::File) -> io::Result<String> {
         cfg_if::cfg_if! {
             if #[cfg(feature = "tokio")] {
                 let this = self;
                 tokio::pin!(this);
-                let mut reader = tokio_util::io::StreamReader::new(this);
+
+                let mut stream = HashStream::new(this);
+                let mut reader = tokio_util::io::StreamReader::new(&mut stream);
                 tokio::io::copy(&mut reader, file).await?;
-                Ok(())
+                Ok(hex::encode(stream.hash().as_bytes()))
             } else if #[cfg(feature = "async-std")] {
                 use futures::stream::TryStreamExt;
                 let this = self;
                 futures::pin_mut!(this);
-                let mut reader = this.into_async_read();
+
+                let mut stream = HashStream::new(this);
+                let mut reader = (&mut stream).into_async_read();
                 async_std::io::copy(&mut reader, file).await?;
-                Ok(())
+                Ok(hex::encode(stream.hash().as_bytes()))
             } else {
                 unimplemented!()
             }
@@ -108,8 +172,7 @@ impl<B: HttpBody> http_body::Body for Body<B> {
     ) -> Poll<Option<Result<Frame<Self::Data>, io::Error>>> {
         match self.as_mut().project().source.project() {
             ProjectedSource::Upstream { body } => body.poll_frame(cx),
-            ProjectedSource::Cached {
-                lock: _,
+            ProjectedSource::File {
                 file,
                 len: _,
                 buf,
@@ -180,17 +243,19 @@ impl<B: HttpBody> http_body::Body for Body<B> {
     fn is_end_stream(&self) -> bool {
         match &self.source {
             Source::Upstream { body } => body.is_end_stream(),
-            Source::Cached { finished, .. } => *finished,
+            Source::File { finished, .. } => *finished,
         }
     }
 
     fn size_hint(&self) -> http_body::SizeHint {
         match &self.source {
             Source::Upstream { body } => body.size_hint(),
-            Source::Cached { len, .. } => http_body::SizeHint::with_exact(*len),
+            Source::File { len, .. } => http_body::SizeHint::with_exact(*len),
         }
     }
 }
+
+impl<B: HttpBody> HttpBody for Body<B> {}
 
 /// An implementation of `Stream` for body.
 ///

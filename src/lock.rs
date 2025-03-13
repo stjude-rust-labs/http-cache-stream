@@ -32,13 +32,6 @@ use crate::runtime;
 #[derive(Debug)]
 pub struct LockedFile(File);
 
-impl LockedFile {
-    /// Downgrades an exclusive lock to a shared lock.
-    pub fn downgrade(&self) -> io::Result<()> {
-        sys::downgrade(&self.0)
-    }
-}
-
 impl Deref for LockedFile {
     type Target = File;
 

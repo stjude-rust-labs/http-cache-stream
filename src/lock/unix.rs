@@ -57,13 +57,6 @@ pub fn error_unsupported(err: &Error) -> bool {
     }
 }
 
-/// Downgrades a lock to shared.
-pub fn downgrade(file: &impl AsRawFd) -> Result<()> {
-    // For `flock`, we just need to lock the file as shared; this will replace any
-    // exclusive lock with a shared lock
-    lock_shared(file)
-}
-
 /// Wrapper around the `flock` system call.
 fn flock(file: RawFd, flag: libc::c_int) -> Result<()> {
     let ret = unsafe { libc::flock(file, flag) };
