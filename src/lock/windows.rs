@@ -71,27 +71,6 @@ pub fn error_unsupported(err: &Error) -> bool {
         .map_or(false, |x| x == ERROR_INVALID_FUNCTION as i32)
 }
 
-/// Downgrades a lock
-pub fn downgrade(file: &impl AsRawHandle) -> Result<()> {
-    // From https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex
-    //
-    // Exclusive locks cannot overlap an existing locked region of a file. Shared
-    // locks can overlap a locked region provided locks held on that region are
-    // shared locks. A shared lock can overlap an exclusive lock if both locks were
-    // created using the same file handle. When a shared lock overlaps an exclusive
-    // lock, the only possible access is a read by the owner of the locks. If the
-    // same range is locked with an exclusive and a shared lock, two unlock
-    // operations are necessary to unlock the region; the first unlock operation
-    // unlocks the exclusive lock, the second unlock operation unlocks the shared
-    // lock.
-
-    // Lock the file again with a shared lock
-    lock_shared(file)?;
-
-    // Unlock the exclusive lock
-    unlock(file)
-}
-
 /// Wrapper around the `LockFileEx` system call.
 fn flock(handle: RawHandle, flags: u32) -> Result<()> {
     unsafe {

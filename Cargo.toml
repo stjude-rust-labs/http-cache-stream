@@ -31,9 +31,10 @@ http-body = "1.0.1"
 bytes = "1.10.1"
 pin-project-lite = "0.2.16"
 cfg-if = "1.0.0"
-# TODO: remove the fixed dependency version once https://github.com/seanmonstar/reqwest/issues/2596 is resolved
-reqwest = { version = "=0.12.12", default-features = false }
+reqwest = { version = "0.12.14", default-features = false }
 reqwest-middleware = "0.4.1"
+blake3 = "1.6.1"
+tempfile = "3.18.0"
 
 [package]
 name = "http-cache-stream"
@@ -66,6 +67,8 @@ http-body = { workspace = true }
 bytes = { workspace = true }
 pin-project-lite = { workspace = true }
 cfg-if = {workspace = true }
+blake3 = { workspace = true }
+tempfile = { workspace = true }
 
 [features]
 default = ["tokio"]

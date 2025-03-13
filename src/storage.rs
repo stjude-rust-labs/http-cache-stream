@@ -14,38 +14,61 @@ mod default;
 
 pub use default::*;
 
+/// Represents a response from storage.
+pub struct StoredResponse<B: HttpBody> {
+    /// The cached response.
+    pub response: Response<Body<B>>,
+    /// The current cache policy.
+    pub policy: CachePolicy,
+    /// The response content digest.
+    pub digest: String,
+}
+
 /// A trait implemented on cache storage.
 ///
 /// Cache keys are strings of hexadecimal characters.
 pub trait CacheStorage: Send + Sync + 'static {
-    /// Gets a response and cache policy for the given key.
+    /// Gets a previously stored response for the given response key.
     ///
     /// Returns `Ok(None)` if a response does not exist in the storage for the
-    /// given key.
+    /// given response key.
     fn get<B: HttpBody>(
         &self,
         key: &str,
-    ) -> impl Future<Output = Result<Option<(Response<Body<B>>, CachePolicy)>>> + Send;
+    ) -> impl Future<Output = Result<Option<StoredResponse<B>>>> + Send;
 
-    /// Puts a response, cache policy, and optionally a body into the storage
-    /// for the given key.
+    /// Puts a response with an existing content digest into the storage for the
+    /// given response key.
     ///
-    /// Returns the body from the cache on success.
-    fn put<B: HttpBody>(
+    /// The provided content digest must come from a previous call to
+    /// [`CacheStorage::get`].
+    fn put(
         &self,
         key: &str,
         parts: &Parts,
         policy: &CachePolicy,
-        body: Option<B>,
-    ) -> impl Future<Output = Result<Body<B>>> + Send;
+        digest: &str,
+    ) -> impl Future<Output = Result<()>> + Send;
 
-    /// Deletes a previously cached response.
+    /// Puts a response with supplied body into the storage for the given
+    /// response key.
     ///
-    /// Does not return error for unrecognized cache keys.
+    /// Returns the body from the cache along with its digest upon success.
+    fn put_with_body<B: HttpBody>(
+        &self,
+        key: &str,
+        parts: &Parts,
+        policy: &CachePolicy,
+        body: B,
+    ) -> impl Future<Output = Result<(Body<B>, String)>> + Send;
+
+    /// Deletes a previously cached response for the given response key.
+    ///
+    /// Deleting an unknown key is not considered an error.
     fn delete(&self, key: &str) -> impl Future<Output = Result<()>> + Send;
 
-    /// Gets the path to a body file for the given key.
+    /// Gets the path to a response body for the given content digest.
     ///
-    /// This method does not verify the body file's existence.
-    fn body_path(&self, key: &str) -> PathBuf;
+    /// This method does not verify the content's existence.
+    fn body_path(&self, digest: &str) -> PathBuf;
 }
