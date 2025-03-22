@@ -69,10 +69,7 @@ impl http_cache_stream::http_body::Body for MiddlewareBody {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
         // The two body implementations differ on error type, so map it here
-        self.project()
-            .body
-            .poll_frame(cx)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        self.project().body.poll_frame(cx).map_err(io::Error::other)
     }
 }
 

@@ -146,14 +146,14 @@ impl<B: HttpBody> Body<B> {
                 let mut reader = tokio_util::io::StreamReader::new(&mut stream);
                 tokio::io::copy(&mut reader, file).await?;
                 Ok(hex::encode(stream.hash().as_bytes()))
-            } else if #[cfg(feature = "async-std")] {
+            } else if #[cfg(feature = "smol")] {
                 use futures::stream::TryStreamExt;
                 let this = self;
                 futures::pin_mut!(this);
 
                 let mut stream = HashStream::new(this);
                 let mut reader = (&mut stream).into_async_read();
-                async_std::io::copy(&mut reader, file).await?;
+                smol::io::copy(&mut reader, file).await?;
                 Ok(hex::encode(stream.hash().as_bytes()))
             } else {
                 unimplemented!()
@@ -203,7 +203,7 @@ impl<B: HttpBody> http_body::Body for Body<B> {
                                 Poll::Ready(Some(Ok(Frame::data(chunk.freeze()))))
                             }
                         }
-                    } else if #[cfg(feature = "async-std")] {
+                    } else if #[cfg(feature = "smol")] {
                         use futures::AsyncRead;
                         use bytes::BufMut;
 

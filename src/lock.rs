@@ -178,9 +178,6 @@ async fn lock(file: File, path: &Path, access: Access) -> io::Result<LockedFile>
         .await,
     ) {
         Some(res) => res,
-        None => Err(io::Error::new(
-            io::ErrorKind::Other,
-            "failed to wait for file lock",
-        )),
+        None => Err(io::Error::other("failed to wait for file lock")),
     }
 }

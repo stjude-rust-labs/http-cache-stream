@@ -14,7 +14,7 @@
 //!
 //! By default, this crate uses `tokio` as its async runtime.
 //!
-//! Enable the `async-std` feature for using the `async-std` runtime instead.
+//! Enable the `smol` feature for using the `smol` runtime instead.
 
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]

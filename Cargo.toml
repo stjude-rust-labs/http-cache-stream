@@ -26,7 +26,6 @@ bincode = { version = "2.0.0", features = ["serde"] }
 tracing = "0.1.41"
 tokio = { version = "1.44.0", default-features = false, features = ["fs", "io-util", "rt"] }
 tokio-util = { version = "0.7.13", features = ["io"] }
-async-std = "1.13.0"
 http-body = "1.0.1"
 bytes = "1.10.1"
 pin-project-lite = "0.2.16"
@@ -35,6 +34,7 @@ reqwest = { version = "0.12.14", default-features = false }
 reqwest-middleware = "0.4.1"
 blake3 = "1.6.1"
 tempfile = "3.18.0"
+smol= "2.0.2"
 
 [package]
 name = "http-cache-stream"
@@ -62,18 +62,19 @@ bincode = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, optional = true }
 tokio-util = { workspace = true, optional = true }
-async-std = { workspace = true, optional = true }
 http-body = { workspace = true }
 bytes = { workspace = true }
 pin-project-lite = { workspace = true }
 cfg-if = {workspace = true }
 blake3 = { workspace = true }
 tempfile = { workspace = true }
+smol = {workspace = true, optional = true}
 
 [features]
 default = ["tokio"]
 tokio = ["dep:tokio", "dep:tokio-util"]
-async-std = ["dep:async-std"]
+smol = ["dep:smol"]
+
 
 [target.'cfg(windows)'.dependencies.windows-sys]
 version = "0.59"
