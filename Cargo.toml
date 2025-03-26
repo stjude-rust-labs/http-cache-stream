@@ -34,7 +34,7 @@ reqwest = { version = "0.12.14", default-features = false }
 reqwest-middleware = "0.4.1"
 blake3 = "1.6.1"
 tempfile = "3.18.0"
-smol= "2.0.2"
+smol = "2.0.2"
 
 [package]
 name = "http-cache-stream"
@@ -68,7 +68,7 @@ pin-project-lite = { workspace = true }
 cfg-if = {workspace = true }
 blake3 = { workspace = true }
 tempfile = { workspace = true }
-smol = {workspace = true, optional = true}
+smol = { workspace = true, optional = true }
 
 [features]
 default = ["tokio"]

@@ -25,7 +25,7 @@
 mod body;
 mod cache;
 pub mod lock;
-pub(crate) mod runtime;
+pub mod runtime;
 pub mod storage;
 
 pub use body::*;
