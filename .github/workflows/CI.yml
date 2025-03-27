@@ -26,7 +26,7 @@ jobs:
       - name: Install clippy
         run: rustup component add clippy
       - run: cargo clippy -- --deny warnings
-      - run: cargo clippy --no-default-features --features async-std -- --deny warnings
+      - run: cargo clippy --no-default-features --features smol -- --deny warnings
       - run: cargo clippy -p http-cache-stream-reqwest -- --deny warnings
 
   test:
@@ -50,8 +50,8 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Test for tokio feature
         run: cargo test --no-default-features --features tokio
-      - name: Test for async-std feature
-        run: cargo test --no-default-features --features async-std
+      - name: Test for smol feature
+        run: cargo test --no-default-features --features smol
       - name: Test for reqwest
         run: cargo test -p http-cache-stream-reqwest
 
@@ -75,8 +75,8 @@ jobs:
         run: cargo binstall -y --version 0.16.0-beta.23 cargo-msrv
       - name: Verify MSRV (tokio)
         run: cargo msrv verify --output-format minimal --no-default-features --features tokio
-      - name: Verify MSRV (async-std)
-        run: cargo msrv verify --output-format minimal --no-default-features --features async-std
+      - name: Verify MSRV (smol)
+        run: cargo msrv verify --output-format minimal --no-default-features --features smol
       - name: Verify MSRV for reqwest
         working-directory: ./crates/reqwest
         run: cargo msrv verify --output-format minimal
