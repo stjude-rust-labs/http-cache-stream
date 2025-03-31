@@ -75,7 +75,6 @@ default = ["tokio"]
 tokio = ["dep:tokio", "dep:tokio-util"]
 smol = ["dep:smol"]
 
-
 [target.'cfg(windows)'.dependencies.windows-sys]
 version = "0.59"
 features = [
