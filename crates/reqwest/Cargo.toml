@@ -10,7 +10,7 @@ homepage = { workspace = true }
 repository = { workspace = true }
 
 [dependencies]
-http-cache-stream = { path = "../.." }
+http-cache-stream = { path = "../.." , version = "0.1.0" }
 anyhow = { workspace = true }
 reqwest = { workspace = true, features = ["stream"] }
 reqwest-middleware = { workspace = true }
