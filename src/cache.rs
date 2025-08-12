@@ -13,6 +13,7 @@ use http::Response;
 use http::StatusCode;
 use http::Uri;
 use http::Version;
+use http::header;
 use http::header::CACHE_CONTROL;
 use http::uri::Authority;
 use http_cache_semantics::AfterResponse;
@@ -48,7 +49,7 @@ pub const X_CACHE: &str = "x-cache";
 pub const X_CACHE_DIGEST: &str = "x-cache-digest";
 
 /// Gets the storage key for a request.
-fn storage_key(method: &Method, uri: &Uri) -> String {
+fn storage_key(method: &Method, uri: &Uri, headers: &HeaderMap) -> String {
     let mut hasher = Sha256::new();
     hasher.update(method.as_str());
     hasher.update(":");
@@ -66,6 +67,10 @@ fn storage_key(method: &Method, uri: &Uri) -> String {
 
     if let Some(query) = uri.query() {
         hasher.update(query);
+    }
+
+    if let Some(value) = headers.get(header::RANGE) {
+        hasher.update(value.as_bytes());
     }
 
     let bytes = hasher.finalize();
@@ -307,7 +312,7 @@ where
         let method = request.method();
         let uri = request.uri();
 
-        let key = storage_key(method, uri);
+        let key = storage_key(method, uri, request.headers());
         if matches!(*method, Method::GET | Method::HEAD) {
             match self.storage.get(&key).await {
                 Ok(Some(stored)) => {
@@ -369,7 +374,7 @@ where
         response.set_cache_status(lookup_status, CacheStatus::Miss);
 
         if matches!(request_like.method, Method::GET | Method::HEAD)
-            && response.status() == StatusCode::OK
+            && response.status().is_success()
             && policy.is_storable()
         {
             let (parts, body) = response.into_parts();
@@ -422,7 +427,7 @@ where
             // If the request is not safe, assume the resource has been modified and delete
             // any cached responses we may have for HEAD/GET
             for method in [Method::HEAD, Method::GET] {
-                let key = storage_key(&method, &request_like.uri);
+                let key = storage_key(&method, &request_like.uri, &request_like.headers);
                 if let Err(e) = self.storage.delete(&key).await {
                     debug!(
                         method = method.as_str(),
