@@ -1,12 +1,14 @@
 //! Implementation of the default cache storage.
 
 use std::fs;
+use std::fs::File;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::bail;
 use futures::FutureExt;
 use http::HeaderMap;
 use http::Response;
@@ -21,8 +23,6 @@ use tracing::debug;
 use super::StoredResponse;
 use crate::HttpBody;
 use crate::body::Body;
-use crate::lock::LockedFile;
-use crate::lock::OpenOptionsExt;
 use crate::runtime;
 use crate::storage::CacheStorage;
 
@@ -360,7 +360,7 @@ impl DefaultCacheStorageInner {
         // Decode the cached response
         Ok(
             bincode::serde::decode_from_std_read::<CachedResponse, _, _>(
-                &mut *response,
+                &mut response,
                 bincode::config::standard(),
             )
             .inspect_err(|e| {
@@ -379,10 +379,10 @@ impl DefaultCacheStorageInner {
     /// This method will block if the response file is locked.
     async fn write_response(&self, key: &str, response: CachedResponseRef<'_>) -> Result<()> {
         // Acquire a shared lock on the response file
-        let mut file: LockedFile = self.lock_response_exclusive(key).await?;
+        let mut file = self.lock_response_exclusive(key).await?;
 
         // Encode the response
-        bincode::serde::encode_into_std_write(response, &mut *file, bincode::config::standard())
+        bincode::serde::encode_into_std_write(response, &mut file, bincode::config::standard())
             .with_context(|| format!("failed to serialize response data for cache key `{key}`"))
             .map(|_| ())
     }
@@ -390,12 +390,11 @@ impl DefaultCacheStorageInner {
     /// Locks a response file for shared access.
     ///
     /// Returns `Ok(None)` if the file does not exist.
-    async fn lock_response_shared(&self, key: &str) -> Result<Option<LockedFile>> {
+    async fn lock_response_shared(&self, key: &str) -> Result<Option<File>> {
         let path = self.response_path(key);
-        fs::OpenOptions::new()
+        match fs::OpenOptions::new()
             .read(true)
-            .open_shared(&path)
-            .await
+            .open(&path)
             .map(Some)
             .or_else(|e| {
                 if e.kind() == io::ErrorKind::NotFound {
@@ -406,10 +405,25 @@ impl DefaultCacheStorageInner {
             })
             .with_context(|| {
                 format!(
-                    "failed to open response file `{path}` with a shared lock",
+                    "failed to open response file `{path}`",
                     path = path.display()
                 )
-            })
+            })? {
+            Some(file) => {
+                match runtime::unwrap_task_output(
+                    runtime::spawn_blocking(move || {
+                        file.lock_shared()
+                            .context("failed to acquire shared lock on response file")?;
+                        Ok(file)
+                    })
+                    .await,
+                ) {
+                    Some(res) => res.map(Some),
+                    None => bail!("failed to wait for file lock"),
+                }
+            }
+            None => Ok(None),
+        }
     }
 
     /// Locks a response file for exclusive access.
@@ -417,7 +431,12 @@ impl DefaultCacheStorageInner {
     /// If the file does not exist, it is created.
     ///
     /// The file is intentionally truncated upon lock acquisition.
-    async fn lock_response_exclusive(&self, key: &str) -> Result<LockedFile> {
+    async fn lock_response_exclusive(&self, key: &str) -> Result<File> {
+        let path = self.response_path(key);
+        let dir = path.parent().expect("should have parent directory");
+        fs::create_dir_all(dir)
+            .with_context(|| format!("failed to create directory `{dir}`", dir = dir.display()))?;
+
         let mut options = fs::OpenOptions::new();
 
         // Note: we don't use the `truncate` option to truncate the file as we need the
@@ -431,17 +450,24 @@ impl DefaultCacheStorageInner {
             options.mode(0o600);
         }
 
-        let path = self.response_path(key);
-        let dir = path.parent().expect("should have parent directory");
-        fs::create_dir_all(dir)
-            .with_context(|| format!("failed to create directory `{dir}`", dir = dir.display()))?;
-
-        let file = options.open_exclusive(&path).await.with_context(|| {
+        let file = options.open(&path).with_context(|| {
             format!(
-                "failed to create response file `{path}` with exclusive lock",
+                "failed to create response file `{path}`",
                 path = path.display()
             )
         })?;
+
+        let file = match runtime::unwrap_task_output(
+            runtime::spawn_blocking(move || {
+                file.lock()
+                    .context("failed to acquire exclusive lock on response file")?;
+                anyhow::Ok(file)
+            })
+            .await,
+        ) {
+            Some(res) => res?,
+            None => bail!("failed to wait for file lock"),
+        };
 
         file.set_len(0).with_context(|| {
             format!(
@@ -449,6 +475,7 @@ impl DefaultCacheStorageInner {
                 path = path.display()
             )
         })?;
+
         Ok(file)
     }
 }
