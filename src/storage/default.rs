@@ -1,11 +1,15 @@
 //! Implementation of the default cache storage.
 
 use std::fs;
+use std::fs::File;
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::bail;
+use futures::FutureExt;
 use http::HeaderMap;
 use http::Response;
 use http::StatusCode;
@@ -19,8 +23,6 @@ use tracing::debug;
 use super::StoredResponse;
 use crate::HttpBody;
 use crate::body::Body;
-use crate::lock::LockedFile;
-use crate::lock::OpenOptionsExt;
 use crate::runtime;
 use crate::storage::CacheStorage;
 
@@ -159,151 +161,19 @@ struct CachedResponse {
 /// will treat the entry as not present.
 ///
 /// [blake3]: https://github.com/BLAKE3-team/BLAKE3
-pub struct DefaultCacheStorage(PathBuf);
+#[derive(Clone)]
+pub struct DefaultCacheStorage(Arc<DefaultCacheStorageInner>);
 
 impl DefaultCacheStorage {
     /// Constructs a new default cache storage with the given
     pub fn new(root_dir: impl Into<PathBuf>) -> Self {
-        Self(root_dir.into())
-    }
-}
-
-impl DefaultCacheStorage {
-    /// Calculates the path to a response file.
-    fn response_path(&self, key: &str) -> PathBuf {
-        let mut path = self.0.to_path_buf();
-        path.push(STORAGE_VERSION);
-        path.push(RESPONSE_DIRECTORY_NAME);
-        path.push(key);
-        path
-    }
-
-    /// Calculates the path to a content file.
-    fn content_path(&self, digest: &str) -> PathBuf {
-        let mut path = self.0.to_path_buf();
-        path.push(STORAGE_VERSION);
-        path.push(CONTENT_DIRECTORY_NAME);
-        path.push(digest);
-        path
-    }
-
-    /// Calculates the path to the temp directory.
-    fn temp_dir_path(&self) -> PathBuf {
-        let mut path = self.0.to_path_buf();
-        path.push(STORAGE_VERSION);
-        path.push(TEMP_DIRECTORY_NAME);
-        path
-    }
-
-    /// Reads a response from storage for the given key.
-    ///
-    /// This method will block if the response file is exclusively locked.
-    async fn read_response(&self, key: &str) -> Result<Option<CachedResponse>> {
-        // Acquire a shared lock on the response file
-        let mut response = match self.lock_response_shared(key).await? {
-            Some(file) => file,
-            None => return Ok(None),
-        };
-
-        // Decode the cached response
-        Ok(
-            bincode::serde::decode_from_std_read::<CachedResponse, _, _>(
-                &mut *response,
-                bincode::config::standard(),
-            )
-            .inspect_err(|e| {
-                debug!(
-                    "failed to deserialize response file `{path}`: {e} (cache entry will be \
-                     ignored)",
-                    path = self.response_path(key).display()
-                );
-            })
-            .ok(),
-        )
-    }
-
-    /// Writes a response to storage for the given key.
-    ///
-    /// This method will block if the response file is locked.
-    async fn write_response(&self, key: &str, response: CachedResponseRef<'_>) -> Result<()> {
-        // Acquire a shared lock on the response file
-        let mut file: LockedFile = self.lock_response_exclusive(key).await?;
-
-        // Encode the response
-        bincode::serde::encode_into_std_write(response, &mut *file, bincode::config::standard())
-            .with_context(|| format!("failed to serialize response data for cache key `{key}`"))
-            .map(|_| ())
-    }
-
-    /// Locks a response file for shared access.
-    ///
-    /// Returns `Ok(None)` if the file does not exist.
-    async fn lock_response_shared(&self, key: &str) -> Result<Option<LockedFile>> {
-        let path = self.response_path(key);
-        fs::OpenOptions::new()
-            .read(true)
-            .open_shared(&path)
-            .await
-            .map(Some)
-            .or_else(|e| {
-                if e.kind() == io::ErrorKind::NotFound {
-                    Ok(None)
-                } else {
-                    Err(e)
-                }
-            })
-            .with_context(|| {
-                format!(
-                    "failed to open response file `{path}` with a shared lock",
-                    path = path.display()
-                )
-            })
-    }
-
-    /// Locks a response file for exclusive access.
-    ///
-    /// If the file does not exist, it is created.
-    ///
-    /// The file is intentionally truncated upon lock acquisition.
-    async fn lock_response_exclusive(&self, key: &str) -> Result<LockedFile> {
-        let mut options = fs::OpenOptions::new();
-
-        // Note: we don't use the `truncate` option to truncate the file as we need the
-        // truncation to happen *after* the lock is acquired
-        options.create(true).write(true);
-
-        #[cfg(unix)]
-        {
-            // On Unix, make the mode 600
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-
-        let path = self.response_path(key);
-        let dir = path.parent().expect("should have parent directory");
-        fs::create_dir_all(dir)
-            .with_context(|| format!("failed to create directory `{dir}`", dir = dir.display()))?;
-
-        let file = options.open_exclusive(&path).await.with_context(|| {
-            format!(
-                "failed to create response file `{path}` with exclusive lock",
-                path = path.display()
-            )
-        })?;
-
-        file.set_len(0).with_context(|| {
-            format!(
-                "failed to truncate response file `{path}`",
-                path = path.display()
-            )
-        })?;
-        Ok(file)
+        Self(Arc::new(DefaultCacheStorageInner(root_dir.into())))
     }
 }
 
 impl CacheStorage for DefaultCacheStorage {
     async fn get<B: HttpBody>(&self, key: &str) -> Result<Option<StoredResponse<B>>> {
-        let cached = match self.read_response(key).await? {
+        let cached = match self.0.read_response(key).await? {
             Some(response) => response,
             None => return Ok(None),
         };
@@ -358,104 +228,254 @@ impl CacheStorage for DefaultCacheStorage {
         policy: &CachePolicy,
         digest: &str,
     ) -> Result<()> {
-        self.write_response(
-            key,
-            CachedResponseRef {
-                status: parts.status,
-                version: parts.version,
-                headers: &parts.headers,
-                digest,
-                policy,
-            },
-        )
-        .await
+        self.0
+            .write_response(
+                key,
+                CachedResponseRef {
+                    status: parts.status,
+                    version: parts.version,
+                    headers: &parts.headers,
+                    digest,
+                    policy,
+                },
+            )
+            .await
     }
 
-    async fn put_with_body<B: HttpBody>(
+    async fn store<B: HttpBody>(
         &self,
-        key: &str,
-        parts: &Parts,
-        policy: &CachePolicy,
+        key: String,
+        parts: Parts,
         body: B,
-    ) -> Result<(Body<B>, String)> {
+        policy: CachePolicy,
+    ) -> Result<Response<Body<B>>> {
         // Create a temporary file for the download of the body
-        let temp_dir = self.temp_dir_path();
+        let inner = self.0.clone();
+        let temp_dir = inner.temp_dir_path();
         fs::create_dir_all(&temp_dir).with_context(|| {
             format!(
                 "failed to create temporary directory `{path}`",
                 path = temp_dir.display()
             )
         })?;
-        let temp_path = tempfile::NamedTempFile::new_in(temp_dir)
-            .context("failed to create temporary body file for cache storage")?
-            .into_temp_path();
 
-        // Write the HTTP body to the file
-        let mut body_file = runtime::File::create(&*temp_path).await.with_context(|| {
-            format!(
-                "failed to create temporary body file `{path}`",
-                path = temp_path.display()
-            )
-        })?;
-        let digest = Body::from_upstream(body)
-            .write_to(&mut body_file)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to write to temporary body file `{path}`",
-                    path = temp_path.display()
-                )
-            })?;
+        // Create a new caching body from the upstream body
+        // The provided callback will be invoked once the cache file hsa been completed
+        let status = parts.status;
+        let version = parts.version;
+        let headers = parts.headers.clone();
 
-        // Drop the body file as we're about to rename it
-        drop(body_file);
+        let body = Body::from_caching_upstream(body, &temp_dir, move |digest, path| {
+            async move {
+                let content_path = inner.content_path(&digest);
+                fs::create_dir_all(content_path.parent().expect("should have parent"))
+                    .context("failed to create content directory")?;
 
-        let content_path = self.content_path(&digest);
-        fs::create_dir_all(content_path.parent().expect("should have parent"))
-            .context("failed to create content directory")?;
+                // Atomically persist the temp file into the `content` location
+                path.persist(&content_path).with_context(|| {
+                    format!(
+                        "failed to persist downloaded body to content path `{path}`",
+                        path = content_path.display()
+                    )
+                })?;
 
-        // Atomically persist the temp file into the `content` location
-        temp_path.persist(&content_path).with_context(|| {
-            format!(
-                "failed to persist downloaded body to content path `{path}`",
-                path = content_path.display()
-            )
-        })?;
+                // Update the response
+                inner
+                    .write_response(
+                        &key,
+                        CachedResponseRef {
+                            status,
+                            version,
+                            headers: &headers,
+                            digest: &digest,
+                            policy: &policy,
+                        },
+                    )
+                    .await?;
 
-        // Update the response
-        self.write_response(
-            key,
-            CachedResponseRef {
-                status: parts.status,
-                version: parts.version,
-                headers: &parts.headers,
-                digest: &digest,
-                policy,
-            },
-        )
+                debug!(key, digest, "response body stored successfully");
+
+                Ok(())
+            }
+            .boxed()
+        })
         .await?;
 
-        Ok((
-            Body::from_file(runtime::File::open(&content_path).await.with_context(|| {
-                format!(
-                    "failed to open body content file `{path}`",
-                    path = content_path.display()
-                )
-            })?)
-            .await?,
-            digest,
-        ))
+        Ok(Response::from_parts(parts, body))
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
         // Acquire an exclusive lock on the response file
         // By acquiring the lock, we truncate the file; any attempt to deserialize an
         // empty response file will fail and be treated as not-present
-        self.lock_response_exclusive(key).await?;
+        self.0.lock_response_exclusive(key).await?;
         Ok(())
     }
 
     fn body_path(&self, digest: &str) -> PathBuf {
-        self.content_path(digest)
+        self.0.content_path(digest)
+    }
+}
+
+/// Represents the default cache storage implementation.
+struct DefaultCacheStorageInner(PathBuf);
+
+impl DefaultCacheStorageInner {
+    /// Calculates the path to a response file.
+    fn response_path(&self, key: &str) -> PathBuf {
+        let mut path = self.0.to_path_buf();
+        path.push(STORAGE_VERSION);
+        path.push(RESPONSE_DIRECTORY_NAME);
+        path.push(key);
+        path
+    }
+
+    /// Calculates the path to a content file.
+    fn content_path(&self, digest: &str) -> PathBuf {
+        let mut path = self.0.to_path_buf();
+        path.push(STORAGE_VERSION);
+        path.push(CONTENT_DIRECTORY_NAME);
+        path.push(digest);
+        path
+    }
+
+    /// Calculates the path to the temp directory.
+    fn temp_dir_path(&self) -> PathBuf {
+        let mut path = self.0.to_path_buf();
+        path.push(STORAGE_VERSION);
+        path.push(TEMP_DIRECTORY_NAME);
+        path
+    }
+
+    /// Reads a response from storage for the given key.
+    ///
+    /// This method will block if the response file is exclusively locked.
+    async fn read_response(&self, key: &str) -> Result<Option<CachedResponse>> {
+        // Acquire a shared lock on the response file
+        let mut response = match self.lock_response_shared(key).await? {
+            Some(file) => file,
+            None => return Ok(None),
+        };
+
+        // Decode the cached response
+        Ok(
+            bincode::serde::decode_from_std_read::<CachedResponse, _, _>(
+                &mut response,
+                bincode::config::standard(),
+            )
+            .inspect_err(|e| {
+                debug!(
+                    "failed to deserialize response file `{path}`: {e} (cache entry will be \
+                     ignored)",
+                    path = self.response_path(key).display()
+                );
+            })
+            .ok(),
+        )
+    }
+
+    /// Writes a response to storage for the given key.
+    ///
+    /// This method will block if the response file is locked.
+    async fn write_response(&self, key: &str, response: CachedResponseRef<'_>) -> Result<()> {
+        // Acquire a shared lock on the response file
+        let mut file = self.lock_response_exclusive(key).await?;
+
+        // Encode the response
+        bincode::serde::encode_into_std_write(response, &mut file, bincode::config::standard())
+            .with_context(|| format!("failed to serialize response data for cache key `{key}`"))
+            .map(|_| ())
+    }
+
+    /// Locks a response file for shared access.
+    ///
+    /// Returns `Ok(None)` if the file does not exist.
+    async fn lock_response_shared(&self, key: &str) -> Result<Option<File>> {
+        let path = self.response_path(key);
+        match fs::OpenOptions::new()
+            .read(true)
+            .open(&path)
+            .map(Some)
+            .or_else(|e| {
+                if e.kind() == io::ErrorKind::NotFound {
+                    Ok(None)
+                } else {
+                    Err(e)
+                }
+            })
+            .with_context(|| {
+                format!(
+                    "failed to open response file `{path}`",
+                    path = path.display()
+                )
+            })? {
+            Some(file) => {
+                match runtime::unwrap_task_output(
+                    runtime::spawn_blocking(move || {
+                        file.lock_shared()
+                            .context("failed to acquire shared lock on response file")?;
+                        Ok(file)
+                    })
+                    .await,
+                ) {
+                    Some(res) => res.map(Some),
+                    None => bail!("failed to wait for file lock"),
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Locks a response file for exclusive access.
+    ///
+    /// If the file does not exist, it is created.
+    ///
+    /// The file is intentionally truncated upon lock acquisition.
+    async fn lock_response_exclusive(&self, key: &str) -> Result<File> {
+        let path = self.response_path(key);
+        let dir = path.parent().expect("should have parent directory");
+        fs::create_dir_all(dir)
+            .with_context(|| format!("failed to create directory `{dir}`", dir = dir.display()))?;
+
+        let mut options = fs::OpenOptions::new();
+
+        // Note: we don't use the `truncate` option to truncate the file as we need the
+        // truncation to happen *after* the lock is acquired
+        options.create(true).write(true);
+
+        #[cfg(unix)]
+        {
+            // On Unix, make the mode 600
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+
+        let file = options.open(&path).with_context(|| {
+            format!(
+                "failed to create response file `{path}`",
+                path = path.display()
+            )
+        })?;
+
+        let file = match runtime::unwrap_task_output(
+            runtime::spawn_blocking(move || {
+                file.lock()
+                    .context("failed to acquire exclusive lock on response file")?;
+                anyhow::Ok(file)
+            })
+            .await,
+        ) {
+            Some(res) => res?,
+            None => bail!("failed to wait for file lock"),
+        };
+
+        file.set_len(0).with_context(|| {
+            format!(
+                "failed to truncate response file `{path}`",
+                path = path.display()
+            )
+        })?;
+
+        Ok(file)
     }
 }

@@ -50,17 +50,16 @@ pub trait CacheStorage: Send + Sync + 'static {
         digest: &str,
     ) -> impl Future<Output = Result<()>> + Send;
 
-    /// Puts a response with supplied body into the storage for the given
-    /// response key.
+    /// Stores a new response body in the cache.
     ///
-    /// Returns the body from the cache along with its digest upon success.
-    fn put_with_body<B: HttpBody>(
+    /// Returns a response with a body streaming to the cache.
+    fn store<B: HttpBody>(
         &self,
-        key: &str,
-        parts: &Parts,
-        policy: &CachePolicy,
+        key: String,
+        parts: Parts,
         body: B,
-    ) -> impl Future<Output = Result<(Body<B>, String)>> + Send;
+        policy: CachePolicy,
+    ) -> impl Future<Output = Result<Response<Body<B>>>> + Send;
 
     /// Deletes a previously cached response for the given response key.
     ///
