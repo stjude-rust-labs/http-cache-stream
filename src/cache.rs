@@ -5,7 +5,6 @@ use std::io;
 use std::time::SystemTime;
 
 use anyhow::Result;
-use anyhow::bail;
 use bytes::Bytes;
 use http::HeaderMap;
 use http::HeaderValue;
@@ -497,7 +496,7 @@ where
 
         // Revalidate the request
         match request.send(headers).await {
-            Ok(response) if response.status() == StatusCode::OK => {
+            Ok(response) if response.status().is_success() => {
                 debug!(
                     method = request_like.method.as_str(),
                     scheme = request_like.uri.scheme_str(),
@@ -575,12 +574,26 @@ where
                             authority = request_like.uri.authority().map(Authority::as_str),
                             path = request_like.uri.path(),
                             key,
-                            "cached response was considered modified despite revalidation"
+                            "cached response was considered modified despite revalidation \
+                             replying with not modified"
                         );
 
-                        // This shouldn't happen as the server say it was unmodified, but
-                        // `http-cache-semantics` said it was
-                        bail!("cached response was considered modified despite revalidation");
+                        // Certain cloud providers (e.g. Azure Blob Storage) do not correctly
+                        // implement 304 responses. Specifically, they aren't returning the same
+                        // headers that a 2XX response would have. This causes the HTTP cache
+                        // implementation to effectively say the body needs updating when it does
+                        // not. Instead, we'll return a stale response with a warning; this will
+                        // cause unnecessary revalidation requests in the future, however, because
+                        // we are not storing an updated cache policy object.
+
+                        Self::prepare_stale_response(
+                            &request_like.method,
+                            &request_like.uri,
+                            &key,
+                            &stored.digest,
+                            &mut stored.response,
+                        );
+                        Ok(stored.response)
                     }
                     AfterResponse::NotModified(policy, parts) => {
                         stored.response.extend_headers(parts.headers);
