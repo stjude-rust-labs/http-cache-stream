@@ -286,6 +286,15 @@ impl Stream for FileSource {
                 }
 
                 let chunk = this.buf.chunk_mut();
+                // SAFETY: `from_raw_parts_mut` will return a mutable slice treating the memory
+                //         as initialized despite itself being uninitialized.
+                //
+                //         However, we are only using the slice as a read buffer, so the
+                //         uninitialized content of the slice is not actually read.
+                //
+                //         Finally, upon a successful read, we advance the mutable buffer by the
+                //         number of bytes read so that the remaining uninitialized content of
+                //         the buffer will remain for the next poll.
                 let slice =
                     unsafe { std::slice::from_raw_parts_mut(chunk.as_mut_ptr(), chunk.len()) };
                 match ready!(this.reader.poll_read(cx, slice)) {
