@@ -79,6 +79,9 @@ pin_project! {
 }
 
 impl<B> CachingUpstreamSource<B> {
+    /// Creates a new body source for caching an upstream response.
+    ///
+    /// The callback is invoked after the body has been written to the cache.
     async fn new<F>(upstream: B, temp_dir: &Path, callback: F) -> Result<Self>
     where
         F: FnOnce(String, TempPath) -> BoxFuture<'static, Result<()>> + Send + 'static,
