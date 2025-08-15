@@ -42,6 +42,18 @@ pub const X_CACHE_LOOKUP: &str = "x-cache-lookup";
 /// Value will be `HIT` if a response was served from the cache, `MISS` if not.
 pub const X_CACHE: &str = "x-cache";
 
+/// The name of the `x-cache-digest` custom header.
+///
+/// This header is only present in the response when returning a body from the
+/// cache.
+///
+/// This can be used to read a body directly from cache storage rather than
+/// reading the body through the response.
+///
+/// This header is only present when a cached response body is being served from
+/// the cache.
+pub const X_CACHE_DIGEST: &str = "x-cache-digest";
+
 /// Gets the storage key for a request.
 fn storage_key(method: &Method, uri: &Uri, headers: &HeaderMap) -> String {
     let mut hasher = Sha256::new();
@@ -126,7 +138,12 @@ trait ResponseExt {
     fn extend_headers(&mut self, headers: HeaderMap);
 
     /// Sets the cache status headers of the response.
-    fn set_cache_status(&mut self, lookup: CacheLookupStatus, status: CacheStatus);
+    fn set_cache_status(
+        &mut self,
+        lookup: CacheLookupStatus,
+        status: CacheStatus,
+        digest: Option<&str>,
+    );
 }
 
 impl<B> ResponseExt for Response<B> {
@@ -168,15 +185,24 @@ impl<B> ResponseExt for Response<B> {
         self.headers_mut().extend(headers);
     }
 
-    fn set_cache_status(&mut self, lookup: CacheLookupStatus, status: CacheStatus) {
-        self.headers_mut().insert(
+    fn set_cache_status(
+        &mut self,
+        lookup: CacheLookupStatus,
+        status: CacheStatus,
+        digest: Option<&str>,
+    ) {
+        let headers = self.headers_mut();
+        headers.insert(
             X_CACHE_LOOKUP,
             lookup.to_string().parse().expect("value should parse"),
         );
-        self.headers_mut().insert(
+        headers.insert(
             X_CACHE,
             status.to_string().parse().expect("value should parse"),
         );
+        if let Some(digest) = digest {
+            headers.insert(X_CACHE_DIGEST, digest.parse().expect("value should parse"));
+        }
     }
 }
 
@@ -374,7 +400,7 @@ where
         let policy =
             CachePolicy::new_options(&request_like, &response, SystemTime::now(), self.options);
 
-        response.set_cache_status(lookup_status, CacheStatus::Miss);
+        response.set_cache_status(lookup_status, CacheStatus::Miss, None);
 
         if matches!(request_like.method, Method::GET | Method::HEAD)
             && response.status().is_success()
@@ -460,9 +486,11 @@ where
                 );
 
                 stored.response.extend_headers(parts.headers);
-                stored
-                    .response
-                    .set_cache_status(CacheLookupStatus::Hit, CacheStatus::Hit);
+                stored.response.set_cache_status(
+                    CacheLookupStatus::Hit,
+                    CacheStatus::Hit,
+                    Some(&stored.digest),
+                );
                 return Ok(stored.response);
             }
             BeforeRequest::Stale {
@@ -506,8 +534,7 @@ where
                 let (parts, body) = response.into_parts();
                 match self.storage.store(key.clone(), parts, body, policy).await {
                     Ok(mut response) => {
-                        // Response was stored, return the response with the storage key
-                        response.set_cache_status(CacheLookupStatus::Hit, CacheStatus::Miss);
+                        response.set_cache_status(CacheLookupStatus::Hit, CacheStatus::Miss, None);
                         Ok(response)
                     }
                     Err(e) => {
@@ -559,7 +586,11 @@ where
                              replying with not modified"
                         );
 
-                        Self::prepare_stale_response(&request_like.uri, &mut stored.response);
+                        Self::prepare_stale_response(
+                            &request_like.uri,
+                            &mut stored.response,
+                            &stored.digest,
+                        );
                         Ok(stored.response)
                     }
                     AfterResponse::NotModified(policy, parts) => {
@@ -582,10 +613,13 @@ where
                                     "response updated in cache successfully"
                                 );
 
-                                // Response was stored and the body comes from storage
+                                // Response was updated and the body comes from storage
                                 let mut cached_response = Response::from_parts(parts, body);
-                                cached_response
-                                    .set_cache_status(CacheLookupStatus::Hit, CacheStatus::Hit);
+                                cached_response.set_cache_status(
+                                    CacheLookupStatus::Hit,
+                                    CacheStatus::Hit,
+                                    Some(&stored.digest),
+                                );
                                 Ok(cached_response)
                             }
                             Err(e) => {
@@ -618,7 +652,11 @@ where
                      with a warning"
                 );
 
-                Self::prepare_stale_response(&request_like.uri, &mut stored.response);
+                Self::prepare_stale_response(
+                    &request_like.uri,
+                    &mut stored.response,
+                    &stored.digest,
+                );
                 Ok(stored.response)
             }
             Ok(mut response) => {
@@ -632,7 +670,7 @@ where
                 );
 
                 // Otherwise, don't serve the cached response at all
-                response.set_cache_status(CacheLookupStatus::Hit, CacheStatus::Miss);
+                response.set_cache_status(CacheLookupStatus::Hit, CacheStatus::Miss, None);
                 Ok(response.map(Body::from_upstream))
             }
             Err(e) => {
@@ -650,7 +688,11 @@ where
                          storage with a warning"
                     );
 
-                    Self::prepare_stale_response(&request_like.uri, &mut stored.response);
+                    Self::prepare_stale_response(
+                        &request_like.uri,
+                        &mut stored.response,
+                        &stored.digest,
+                    );
                     Ok(stored.response)
                 }
             }
@@ -658,7 +700,7 @@ where
     }
 
     /// Prepares a stale response for sending back to the client.
-    fn prepare_stale_response<B>(uri: &Uri, response: &mut Response<Body<B>>) {
+    fn prepare_stale_response<B>(uri: &Uri, response: &mut Response<Body<B>>, digest: &str) {
         // If the server failed to give us a response, add the required warning to the
         // cached response:
         //   111 Revalidation failed
@@ -667,6 +709,6 @@ where
         //   due to an inability to reach the server.
         // (https://tools.ietf.org/html/rfc2616#section-14.46)
         response.add_warning(uri, 111, "Revalidation failed");
-        response.set_cache_status(CacheLookupStatus::Hit, CacheStatus::Hit);
+        response.set_cache_status(CacheLookupStatus::Hit, CacheStatus::Hit, Some(digest));
     }
 }

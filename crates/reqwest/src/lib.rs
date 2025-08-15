@@ -38,6 +38,7 @@ use bytes::Bytes;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 pub use http_cache_stream::X_CACHE;
+pub use http_cache_stream::X_CACHE_DIGEST;
 pub use http_cache_stream::X_CACHE_LOOKUP;
 use http_cache_stream::http::Extensions;
 use http_cache_stream::http::Uri;
