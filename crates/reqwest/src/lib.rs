@@ -43,6 +43,7 @@ pub use http_cache_stream::X_CACHE_LOOKUP;
 use http_cache_stream::http::Extensions;
 use http_cache_stream::http::Uri;
 use http_cache_stream::http_body::Frame;
+pub use http_cache_stream::semantics;
 pub use http_cache_stream::semantics::CacheOptions;
 pub use http_cache_stream::storage;
 pub use http_cache_stream::storage::CacheStorage;
@@ -50,6 +51,7 @@ use reqwest::Body;
 use reqwest::Request;
 use reqwest::Response;
 use reqwest::ResponseBuilderExt;
+use reqwest::header::HeaderMap;
 use reqwest_middleware::Next;
 
 pin_project_lite::pin_project! {
@@ -150,6 +152,24 @@ impl<S: CacheStorage> Cache<S> {
     /// Construct a new caching middleware with the given storage and options.
     pub fn new_with_options(storage: S, options: CacheOptions) -> Self {
         Self(http_cache_stream::Cache::new_with_options(storage, options))
+    }
+
+    /// Sets the revalidation hook to use.
+    ///
+    /// The hook is provided the original request and a mutable header map
+    /// containing headers explicitly set for the revalidation request.
+    ///
+    /// For example, a hook may alter the revalidation headers to update an
+    /// `Authorization` header based on the headers used for revalidation.
+    ///
+    /// If the hook returns an error, the error is propagated out as the result
+    /// of the original request.
+    pub fn with_revalidation_hook(
+        mut self,
+        hook: impl Fn(&dyn semantics::RequestLike, &mut HeaderMap) -> Result<()> + Send + Sync + 'static,
+    ) -> Self {
+        self.0 = self.0.with_revalidation_hook(hook);
+        self
     }
 
     /// Gets the underlying storage of the cache.
