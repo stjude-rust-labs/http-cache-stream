@@ -28,11 +28,12 @@
   </p>
 </p>
 
-## Getting started
+## Overview
 
-TODO: complete this section
+The `http-cache-stream` crate can be used to cache responses in accordance with
+HTTP caching semantics.
 
-## How this crate differs from [`http-cache`][http-cache]
+### How this crate differs from [`http-cache`][http-cache]
 
 The [`http-cache`][http-cache] crate is a highly-configurable HTTP cache that
 supports different storage backends and middleware for many popular Rust HTTP
@@ -49,7 +50,7 @@ The `http-cache-stream` crate is inspired by the implementation provided by
   cached bodies, but does provide some fault tolerance for writes to cache
   storage (i.e. partially written cache entries are discarded).
 * The API for `http-cache-stream` is not nearly as configurable as `http-cache`.
-* Only a middleware implementation for `reqwest` will be made initially.
+* Currently only supports a middleware implementation for `reqwest`.
 
 ## Development
 
