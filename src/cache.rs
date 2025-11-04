@@ -553,7 +553,7 @@ where
             authority = request_like.uri.authority().map(Authority::as_str),
             path = request_like.uri.path(),
             key,
-            "response is stale: sending request upstream for validation"
+            "response is stale: sending request upstream for revalidation"
         );
 
         // Invoke the revalidation hook if the request will use different headers
