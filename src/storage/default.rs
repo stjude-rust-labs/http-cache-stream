@@ -479,3 +479,132 @@ impl DefaultCacheStorageInner {
         Ok(file)
     }
 }
+
+#[cfg(test)]
+mod test {
+    use std::pin::Pin;
+    use std::task::Context;
+    use std::task::Poll;
+
+    use bytes::Bytes;
+    use futures::StreamExt;
+    use http::Request;
+    use http_body::Frame;
+    use http_cache_semantics::CachePolicy;
+    use pin_project_lite::pin_project;
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::http_body::Body;
+
+    pin_project! {
+        struct TestBody {
+            #[pin]
+            body: String,
+        }
+    }
+
+    impl TestBody {
+        fn new(body: impl Into<String>) -> Self {
+            Self { body: body.into() }
+        }
+    }
+
+    impl Body for TestBody {
+        type Data = Bytes;
+        type Error = io::Error;
+
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+            self.project().body.poll_frame(cx).map_err(io::Error::other)
+        }
+    }
+
+    impl HttpBody for TestBody {}
+
+    #[tokio::test]
+    async fn cache_miss() {
+        let dir = tempdir().unwrap();
+        let storage = DefaultCacheStorage::new(dir.path());
+        assert!(
+            storage
+                .get::<TestBody>("does-not-exist")
+                .await
+                .expect("should not fail")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_hit() {
+        const KEY: &str = "key";
+        const BODY: &str = "hello world";
+        const DIGEST: &str = "d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24";
+        const HEADER_NAME: &str = "foo";
+        const HEADER_VALUE: &str = "bar";
+
+        let dir = tempdir().unwrap();
+        let storage = DefaultCacheStorage::new(dir.path());
+
+        // Assert the key doesn't currently exist in the cache
+        assert!(storage.get::<TestBody>(KEY).await.unwrap().is_none());
+
+        // Store a response in the cache
+        let request = Request::builder().body("").unwrap();
+        let response = Response::builder().body(TestBody::new(BODY)).unwrap();
+        let policy = CachePolicy::new(&request, &response);
+
+        let (parts, body) = response.into_parts();
+        let mut response = storage
+            .store(KEY.to_string(), parts, body, policy)
+            .await
+            .unwrap();
+
+        // Read the response to the end to fully cache the body
+        let bytes = response.body_mut().next().await.unwrap().unwrap();
+        assert!(response.body_mut().next().await.is_none());
+        assert_eq!(bytes, BODY);
+        drop(response);
+
+        // Lookup the cache entry (should exist now, without the header)
+        let cached = storage.get::<TestBody>(KEY).await.unwrap().unwrap();
+        assert!(cached.response.headers().get(HEADER_NAME).is_none());
+
+        // Read the cached response
+        let body = cached.response.into_body().next().await.unwrap().unwrap();
+        assert_eq!(body, BODY);
+        assert_eq!(cached.digest, DIGEST);
+
+        // Create an "updated" response and put it into the cache with the same body
+        let response: Response<TestBody> = Response::builder()
+            .header(HEADER_NAME, HEADER_VALUE)
+            .body(TestBody::new(BODY))
+            .unwrap();
+        let policy = CachePolicy::new(&request, &response);
+
+        let (parts, _) = response.into_parts();
+        storage.put(KEY, &parts, &policy, DIGEST).await.unwrap();
+
+        // Lookup the cache entry (should exist with the header)
+        let cached = storage.get::<TestBody>(KEY).await.unwrap().unwrap();
+        assert_eq!(
+            cached
+                .response
+                .headers()
+                .get(HEADER_NAME)
+                .map(|v| v.to_str().unwrap()),
+            Some(HEADER_VALUE)
+        );
+
+        // Read the cached response (should be unchanged)
+        let body = cached.response.into_body().next().await.unwrap().unwrap();
+        assert_eq!(body, BODY);
+        assert_eq!(cached.digest, DIGEST);
+
+        // Delete the key and ensure it no longer exists
+        storage.delete(KEY).await.unwrap();
+        assert!(storage.get::<TestBody>(KEY).await.unwrap().is_none());
+    }
+}
