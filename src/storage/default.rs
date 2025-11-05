@@ -480,7 +480,7 @@ impl DefaultCacheStorageInner {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 mod test {
     use std::pin::Pin;
     use std::task::Context;
