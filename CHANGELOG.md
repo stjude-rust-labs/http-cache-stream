@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+#### Added
+
+* Added `with_revalidation_hook` to allow for modifying revalidation request
+  headers ([#15](https://github.com/stjude-rust-labs/http-cache-stream/pull/15)).
+
 ## 0.2.0 - 08-15-2025
 
 #### Changed

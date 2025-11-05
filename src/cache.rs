@@ -291,12 +291,31 @@ impl http_cache_semantics::RequestLike for RequestLike {
     }
 }
 
+/// Represents a revalidation hook.
+///
+/// The hook is provided the original request and a mutable header map
+/// containing headers explicitly set for the revalidation request.
+///
+/// For example, a hook may alter the revalidation headers to update an
+/// `Authorization` header based on the headers used for revalidation.
+///
+/// If the hook returns an error, the error is propagated out as the result of
+/// the original request.
+type RevalidationHook = dyn Fn(&dyn http_cache_semantics::RequestLike, &mut HeaderMap) -> Result<()>
+    + Send
+    + Sync
+    + 'static;
+
 /// Implement a HTTP cache.
 pub struct Cache<S> {
     /// The cache storage.
     storage: S,
     /// The cache options to use.
     options: CacheOptions,
+    /// Stores the revalidation hook.
+    ///
+    /// This is `None` if no revalidation hook is used.
+    hook: Option<Box<RevalidationHook>>,
 }
 
 impl<S> Cache<S>
@@ -314,12 +333,38 @@ where
                 shared: false,
                 ..Default::default()
             },
+            hook: None,
         }
     }
 
     /// Construct a new cache with the given storage and options.
     pub fn new_with_options(storage: S, options: CacheOptions) -> Self {
-        Self { storage, options }
+        Self {
+            storage,
+            options,
+            hook: None,
+        }
+    }
+
+    /// Sets the revalidation hook to use.
+    ///
+    /// The hook is provided the original request and a mutable header map
+    /// containing headers explicitly set for the revalidation request.
+    ///
+    /// For example, a hook may alter the revalidation headers to update an
+    /// `Authorization` header based on the headers used for revalidation.
+    ///
+    /// If the hook returns an error, the error is propagated out as the result
+    /// of the original request.
+    pub fn with_revalidation_hook(
+        mut self,
+        hook: impl Fn(&dyn http_cache_semantics::RequestLike, &mut HeaderMap) -> Result<()>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.hook = Some(Box::new(hook));
+        self
     }
 
     /// Gets the storage used by the cache.
@@ -469,7 +514,7 @@ where
     ) -> Result<Response<Body<B>>> {
         let request_like = RequestLike::new(&request);
 
-        let headers = match stored
+        let mut headers = match stored
             .policy
             .before_request(&request_like, SystemTime::now())
         {
@@ -508,8 +553,15 @@ where
             authority = request_like.uri.authority().map(Authority::as_str),
             path = request_like.uri.path(),
             key,
-            "response is stale: sending request upstream for validation"
+            "response is stale: sending request upstream for revalidation"
         );
+
+        // Invoke the revalidation hook if the request will use different headers
+        if let Some(headers) = &mut headers
+            && let Some(hook) = &self.hook
+        {
+            hook(&request_like, headers)?;
+        }
 
         // Revalidate the request
         match request.send(headers).await {
