@@ -1,6 +1,6 @@
 [package]
 name = "http-cache-stream-reqwest"
-version = "0.2.0"
+version = "0.3.0"
 description = "A caching middleware for reqwest that supports streaming bodies."
 rust-version = { workspace = true }
 edition = { workspace = true }
@@ -14,7 +14,7 @@ anyhow = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
 http-body-util = { workspace = true }
-http-cache-stream = { path = "../..", version = "0.2.0" }
+http-cache-stream = { path = "../..", version = "0.3.0" }
 reqwest = { workspace = true, features = ["stream"] }
 reqwest-middleware = { workspace = true }
 
