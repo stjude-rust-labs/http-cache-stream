@@ -14,13 +14,14 @@ use bytes::Bytes;
 use bytes::BytesMut;
 use futures::Stream;
 use futures::future::BoxFuture;
+use http_body::Body;
 use http_body::Frame;
+use http_body_util::BodyStream;
 use pin_project_lite::pin_project;
 use runtime::AsyncWrite;
 use tempfile::NamedTempFile;
 use tempfile::TempPath;
 
-use crate::HttpBody;
 use crate::runtime;
 
 /// The default capacity for reading from files.
@@ -34,7 +35,7 @@ pin_project! {
         ReadingUpstream {
             // The upstream response body.
             #[pin]
-            upstream: B,
+            upstream: BodyStream<B>,
             // The writer for the cache file.
             #[pin]
             writer: Option<runtime::BufWriter<runtime::File>>,
@@ -99,7 +100,7 @@ impl<B> CachingUpstreamSource<B> {
 
         Ok(Self {
             state: CachingUpstreamSourceState::ReadingUpstream {
-                upstream,
+                upstream: BodyStream::new(upstream),
                 writer: Some(runtime::BufWriter::new(file)),
                 path: Some(path),
                 callback: Some(Box::new(callback)),
@@ -110,13 +111,19 @@ impl<B> CachingUpstreamSource<B> {
     }
 }
 
-impl<B> Stream for CachingUpstreamSource<B>
+impl<B> Body for CachingUpstreamSource<B>
 where
-    B: HttpBody,
+    B: Body,
+    B::Data: Into<Bytes>,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-    type Item = io::Result<Bytes>;
+    type Data = Bytes;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<std::result::Result<Frame<Self::Data>, Self::Error>>> {
         loop {
             let this = self.as_mut().project();
             match this.state.project() {
@@ -130,19 +137,25 @@ where
                 } => {
                     // Check to see if a read is needed
                     if current.is_empty() {
-                        match ready!(upstream.poll_next_data(cx)) {
-                            Some(Ok(data)) if data.is_empty() => continue,
-                            Some(Ok(data)) => {
-                                // Update the hasher with the data that was read
-                                hasher.update(&data);
-                                *current = data;
+                        match ready!(upstream.poll_next(cx)) {
+                            Some(Ok(frame)) => {
+                                let frame = frame.map_data(Into::into);
+                                match frame.into_data() {
+                                    Ok(data) if !data.is_empty() => {
+                                        // Update the hasher with the data that was read
+                                        hasher.update(&data);
+                                        *current = data;
+                                    }
+                                    Ok(_) => continue,
+                                    Err(frame) => return Poll::Ready(Some(Ok(frame))),
+                                }
                             }
                             Some(Err(e)) => {
                                 // Set state to finished and return
                                 self.set(Self {
                                     state: CachingUpstreamSourceState::Completed,
                                 });
-                                return Poll::Ready(Some(Err(e)));
+                                return Poll::Ready(Some(Err(e.into())));
                             }
                             None => {
                                 let writer = writer.take();
@@ -170,13 +183,13 @@ where
                     return match ready!(writer.as_pin_mut().unwrap().poll_write(cx, &data)) {
                         Ok(n) => {
                             *current = data.split_off(n);
-                            Poll::Ready(Some(Ok(data)))
+                            Poll::Ready(Some(Ok(Frame::data(data))))
                         }
                         Err(e) => {
                             self.set(Self {
                                 state: CachingUpstreamSourceState::Completed,
                             });
-                            Poll::Ready(Some(Err(e)))
+                            Poll::Ready(Some(Err(e.into())))
                         }
                     };
                 }
@@ -205,7 +218,7 @@ where
                             self.set(Self {
                                 state: CachingUpstreamSourceState::Completed,
                             });
-                            return Poll::Ready(Some(Err(e)));
+                            return Poll::Ready(Some(Err(e.into())));
                         }
                     }
                 }
@@ -221,7 +234,7 @@ where
                             self.set(Self {
                                 state: CachingUpstreamSourceState::Completed,
                             });
-                            Poll::Ready(Some(Err(io::Error::other(e))))
+                            Poll::Ready(Some(Err(e.into_boxed_dyn_error())))
                         }
                     };
                 }
@@ -246,10 +259,14 @@ pin_project! {
     }
 }
 
-impl Stream for FileSource {
-    type Item = io::Result<Bytes>;
+impl Body for FileSource {
+    type Data = Bytes;
+    type Error = io::Error;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<io::Result<Frame<Self::Data>>>> {
         let this = self.project();
 
         if *this.finished {
@@ -269,7 +286,7 @@ impl Stream for FileSource {
                     }
                     Ok(_) => {
                         let chunk = this.buf.split();
-                        Poll::Ready(Some(Ok(chunk.freeze())))
+                        Poll::Ready(Some(Ok(Frame::data(chunk.freeze()))))
                     }
                     Err(err) => {
                         *this.finished = true;
@@ -334,7 +351,7 @@ pin_project! {
         Upstream {
             // The underlying source for the body.
             #[pin]
-            source: B
+            source: BodyStream<B>
         },
         /// The body is coming from upstream with being cached.
         CachingUpstream {
@@ -352,23 +369,27 @@ pin_project! {
 }
 
 pin_project! {
-    /// Represents a response body.
-    pub struct Body<B> {
+    /// Represents a cache body.
+    ///
+    /// The cache body may be sourced from an upstream response or from a file from the cache.
+    pub struct CacheBody<B> {
         // The body source.
         #[pin]
         source: BodySource<B>
     }
 }
 
-impl<B> Body<B>
+impl<B> CacheBody<B>
 where
-    B: HttpBody,
+    B: Body,
 {
     /// Constructs a new body from an upstream response body that is not being
     /// cached.
     pub(crate) fn from_upstream(upstream: B) -> Self {
         Self {
-            source: BodySource::Upstream { source: upstream },
+            source: BodySource::Upstream {
+                source: BodyStream::new(upstream),
+            },
         }
     }
 
@@ -406,23 +427,26 @@ where
     }
 }
 
-impl<B> http_body::Body for Body<B>
+impl<B> Body for CacheBody<B>
 where
-    B: HttpBody,
+    B: Body,
+    B::Data: Into<Bytes>,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
     type Data = Bytes;
-    type Error = io::Error;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
 
     fn poll_frame(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Self::Data>, io::Error>>> {
+    ) -> Poll<Option<std::result::Result<http_body::Frame<Self::Data>, Self::Error>>> {
         match self.project().source.project() {
-            ProjectedBodySource::Upstream { source } => source.poll_frame(cx),
-            ProjectedBodySource::CachingUpstream { source } => {
-                source.poll_next(cx).map_ok(Frame::data)
-            }
-            ProjectedBodySource::File { source } => source.poll_next(cx).map_ok(Frame::data),
+            ProjectedBodySource::Upstream { source } => source
+                .poll_frame(cx)
+                .map_ok(|f| f.map_data(Into::into))
+                .map_err(Into::into),
+            ProjectedBodySource::CachingUpstream { source } => source.poll_frame(cx),
+            ProjectedBodySource::File { source } => source.poll_frame(cx).map_err(Into::into),
         }
     }
 
@@ -438,36 +462,14 @@ where
 
     fn size_hint(&self) -> http_body::SizeHint {
         match &self.source {
-            BodySource::Upstream { source } => source.size_hint(),
+            BodySource::Upstream { source } => Body::size_hint(source),
             BodySource::CachingUpstream { source } => match &source.state {
                 CachingUpstreamSourceState::ReadingUpstream { upstream, .. } => {
-                    upstream.size_hint()
+                    Body::size_hint(upstream)
                 }
                 _ => http_body::SizeHint::default(),
             },
             BodySource::File { source } => http_body::SizeHint::with_exact(source.len),
-        }
-    }
-}
-
-impl<B> HttpBody for Body<B> where B: HttpBody + Send {}
-
-/// An implementation of `Stream` for body.
-///
-/// This implementation only retrieves the data frames of the body.
-///
-/// Trailer frames are not read.
-impl<B> Stream for Body<B>
-where
-    B: HttpBody,
-{
-    type Item = io::Result<Bytes>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.project().source.project() {
-            ProjectedBodySource::Upstream { source } => source.poll_next_data(cx),
-            ProjectedBodySource::CachingUpstream { source } => source.poll_next(cx),
-            ProjectedBodySource::File { source } => source.poll_next(cx),
         }
     }
 }

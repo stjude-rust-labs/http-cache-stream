@@ -15,14 +15,14 @@ use http::Response;
 use http::StatusCode;
 use http::Version;
 use http::response::Parts;
+use http_body::Body;
 use http_cache_semantics::CachePolicy;
 use serde::Deserialize;
 use serde::Serialize;
 use tracing::debug;
 
 use super::StoredResponse;
-use crate::HttpBody;
-use crate::body::Body;
+use crate::body::CacheBody;
 use crate::runtime;
 use crate::storage::CacheStorage;
 
@@ -172,7 +172,7 @@ impl DefaultCacheStorage {
 }
 
 impl CacheStorage for DefaultCacheStorage {
-    async fn get<B: HttpBody>(&self, key: &str) -> Result<Option<StoredResponse<B>>> {
+    async fn get<B: Body + Send>(&self, key: &str) -> Result<Option<StoredResponse<B>>> {
         let cached = match self.0.read_response(key).await? {
             Some(response) => response,
             None => return Ok(None),
@@ -209,7 +209,7 @@ impl CacheStorage for DefaultCacheStorage {
 
         Ok(Some(StoredResponse {
             response: builder
-                .body(Body::from_file(body).await.with_context(|| {
+                .body(CacheBody::from_file(body).await.with_context(|| {
                     format!(
                         "failed to create response body for `{path}`",
                         path = path.display()
@@ -242,13 +242,13 @@ impl CacheStorage for DefaultCacheStorage {
             .await
     }
 
-    async fn store<B: HttpBody>(
+    async fn store<B: Body + Send>(
         &self,
         key: String,
         parts: Parts,
         body: B,
         policy: CachePolicy,
-    ) -> Result<Response<Body<B>>> {
+    ) -> Result<Response<CacheBody<B>>> {
         // Create a temporary file for the download of the body
         let inner = self.0.clone();
         let temp_dir = inner.temp_dir_path();
@@ -265,7 +265,7 @@ impl CacheStorage for DefaultCacheStorage {
         let version = parts.version;
         let headers = parts.headers.clone();
 
-        let body = Body::from_caching_upstream(body, &temp_dir, move |digest, path| {
+        let body = CacheBody::from_caching_upstream(body, &temp_dir, move |digest, path| {
             async move {
                 let content_path = inner.content_path(&digest);
                 fs::create_dir_all(content_path.parent().expect("should have parent"))
@@ -482,47 +482,15 @@ impl DefaultCacheStorageInner {
 
 #[cfg(all(test, feature = "tokio"))]
 mod test {
-    use std::pin::Pin;
-    use std::task::Context;
-    use std::task::Poll;
-
     use bytes::Bytes;
     use futures::StreamExt;
     use http::Request;
-    use http_body::Frame;
+    use http_body_util::BodyDataStream;
+    use http_body_util::Full;
     use http_cache_semantics::CachePolicy;
-    use pin_project_lite::pin_project;
     use tempfile::tempdir;
 
     use super::*;
-    use crate::http_body::Body;
-
-    pin_project! {
-        struct TestBody {
-            #[pin]
-            body: String,
-        }
-    }
-
-    impl TestBody {
-        fn new(body: impl Into<String>) -> Self {
-            Self { body: body.into() }
-        }
-    }
-
-    impl Body for TestBody {
-        type Data = Bytes;
-        type Error = io::Error;
-
-        fn poll_frame(
-            self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-        ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
-            self.project().body.poll_frame(cx).map_err(io::Error::other)
-        }
-    }
-
-    impl HttpBody for TestBody {}
 
     #[tokio::test]
     async fn cache_miss() {
@@ -530,7 +498,7 @@ mod test {
         let storage = DefaultCacheStorage::new(dir.path());
         assert!(
             storage
-                .get::<TestBody>("does-not-exist")
+                .get::<String>("does-not-exist")
                 .await
                 .expect("should not fail")
                 .is_none()
@@ -549,38 +517,43 @@ mod test {
         let storage = DefaultCacheStorage::new(dir.path());
 
         // Assert the key doesn't currently exist in the cache
-        assert!(storage.get::<TestBody>(KEY).await.unwrap().is_none());
+        assert!(storage.get::<Full<Bytes>>(KEY).await.unwrap().is_none());
 
         // Store a response in the cache
         let request = Request::builder().body("").unwrap();
-        let response = Response::builder().body(TestBody::new(BODY)).unwrap();
-        let policy = CachePolicy::new(&request, &response);
+        let response = Response::builder().body(Full::<Bytes>::from(BODY)).unwrap();
+        let policy: CachePolicy = CachePolicy::new(&request, &response);
 
         let (parts, body) = response.into_parts();
-        let mut response = storage
+        let response = storage
             .store(KEY.to_string(), parts, body, policy)
             .await
             .unwrap();
 
         // Read the response to the end to fully cache the body
-        let bytes = response.body_mut().next().await.unwrap().unwrap();
-        assert!(response.body_mut().next().await.is_none());
-        assert_eq!(bytes, BODY);
-        drop(response);
+        let mut stream = BodyDataStream::new(response.into_body());
+        let data = stream.next().await.unwrap().unwrap();
+        assert!(stream.next().await.is_none());
+        assert_eq!(data, BODY);
+        drop(stream);
 
         // Lookup the cache entry (should exist now, without the header)
-        let cached = storage.get::<TestBody>(KEY).await.unwrap().unwrap();
+        let cached = storage.get::<Full<Bytes>>(KEY).await.unwrap().unwrap();
         assert!(cached.response.headers().get(HEADER_NAME).is_none());
 
         // Read the cached response
-        let body = cached.response.into_body().next().await.unwrap().unwrap();
-        assert_eq!(body, BODY);
+        let data = BodyDataStream::new(cached.response.into_body())
+            .next()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(data, BODY);
         assert_eq!(cached.digest, DIGEST);
 
         // Create an "updated" response and put it into the cache with the same body
-        let response: Response<TestBody> = Response::builder()
+        let response = Response::builder()
             .header(HEADER_NAME, HEADER_VALUE)
-            .body(TestBody::new(BODY))
+            .body(Full::<Bytes>::from(BODY))
             .unwrap();
         let policy = CachePolicy::new(&request, &response);
 
@@ -588,7 +561,7 @@ mod test {
         storage.put(KEY, &parts, &policy, DIGEST).await.unwrap();
 
         // Lookup the cache entry (should exist with the header)
-        let cached = storage.get::<TestBody>(KEY).await.unwrap().unwrap();
+        let cached = storage.get::<Full<Bytes>>(KEY).await.unwrap().unwrap();
         assert_eq!(
             cached
                 .response
@@ -599,12 +572,16 @@ mod test {
         );
 
         // Read the cached response (should be unchanged)
-        let body = cached.response.into_body().next().await.unwrap().unwrap();
-        assert_eq!(body, BODY);
+        let data = BodyDataStream::new(cached.response.into_body())
+            .next()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(data, BODY);
         assert_eq!(cached.digest, DIGEST);
 
         // Delete the key and ensure it no longer exists
         storage.delete(KEY).await.unwrap();
-        assert!(storage.get::<TestBody>(KEY).await.unwrap().is_none());
+        assert!(storage.get::<Full<Bytes>>(KEY).await.unwrap().is_none());
     }
 }

@@ -27,22 +27,16 @@
 #![warn(clippy::missing_docs_in_private_items)]
 #![warn(rustdoc::broken_intra_doc_links)]
 
-use std::io;
-use std::pin::Pin;
-use std::task::Context;
-use std::task::Poll;
-
 use anyhow::Context as _;
 use anyhow::Result;
-use bytes::Bytes;
 use futures::FutureExt;
 use futures::future::BoxFuture;
+use http_body_util::BodyDataStream;
 pub use http_cache_stream::X_CACHE;
 pub use http_cache_stream::X_CACHE_DIGEST;
 pub use http_cache_stream::X_CACHE_LOOKUP;
 use http_cache_stream::http::Extensions;
 use http_cache_stream::http::Uri;
-use http_cache_stream::http_body::Frame;
 pub use http_cache_stream::semantics;
 pub use http_cache_stream::semantics::CacheOptions;
 pub use http_cache_stream::storage;
@@ -53,29 +47,6 @@ use reqwest::Response;
 use reqwest::ResponseBuilderExt;
 use reqwest::header::HeaderMap;
 use reqwest_middleware::Next;
-
-pin_project_lite::pin_project! {
-    /// Adapter for [`Body`] to implement `HttpBody`.
-    struct MiddlewareBody {
-        #[pin]
-        body: Body
-    }
-}
-
-impl http_cache_stream::http_body::Body for MiddlewareBody {
-    type Data = Bytes;
-    type Error = io::Error;
-
-    fn poll_frame(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
-        // The two body implementations differ on error type, so map it here
-        self.project().body.poll_frame(cx).map_err(io::Error::other)
-    }
-}
-
-impl http_cache_stream::HttpBody for MiddlewareBody {}
 
 /// Represents a request flowing through the cache middleware.
 struct MiddlewareRequest<'a, 'b> {
@@ -89,7 +60,7 @@ struct MiddlewareRequest<'a, 'b> {
     extensions: &'b mut Extensions,
 }
 
-impl http_cache_stream::Request<MiddlewareBody> for MiddlewareRequest<'_, '_> {
+impl http_cache_stream::Request<Body> for MiddlewareRequest<'_, '_> {
     fn version(&self) -> http_cache_stream::http::Version {
         self.request.version()
     }
@@ -109,7 +80,7 @@ impl http_cache_stream::Request<MiddlewareBody> for MiddlewareRequest<'_, '_> {
     async fn send(
         mut self,
         headers: Option<http_cache_stream::http::HeaderMap>,
-    ) -> anyhow::Result<http_cache_stream::http::Response<MiddlewareBody>> {
+    ) -> anyhow::Result<http_cache_stream::http::Response<Body>> {
         // Override the specified headers
         if let Some(headers) = headers {
             self.request.headers_mut().extend(headers);
@@ -133,9 +104,7 @@ impl http_cache_stream::Request<MiddlewareBody> for MiddlewareRequest<'_, '_> {
             .expect("should have headers")
             .extend(headers);
         builder
-            .body(MiddlewareBody {
-                body: Body::wrap_stream(response.bytes_stream()),
-            })
+            .body(response.into())
             .context("failed to create response")
     }
 }
@@ -205,7 +174,7 @@ impl<S: CacheStorage> reqwest_middleware::Middleware for Cache<S> {
                 .0
                 .send(request)
                 .await
-                .map(|r| r.map(Body::wrap_stream).into())?;
+                .map(|r| r.map(|b| Body::wrap_stream(BodyDataStream::new(b))).into())?;
             Ok(response)
         }
         .boxed()
@@ -282,6 +251,7 @@ mod test {
     #[tokio::test]
     async fn no_store() {
         const BODY: &str = "hello world!";
+        // Blake3 digest of the body (from https://emn178.github.io/online-tools/blake3/)
         const DIGEST: &str = "3aa61c409fd7717c9d9c639202af2fae470c0ef669be7ba2caea5779cb534e9d";
 
         let dir = tempdir().unwrap();
@@ -312,8 +282,8 @@ mod test {
         assert!(response.headers().get(X_CACHE_DIGEST).is_none());
         assert_eq!(response.text().await.unwrap(), BODY);
 
-        // Ensure no content directory
-        assert!(!cache.storage().body_path(DIGEST).exists());
+        // Ensure the body wasn't stored in the cache
+        assert!(!cache.storage().body_path(DIGEST).is_file());
 
         // Response should *still* not be served from the cache or stored
         let response = client.get("http://test.local/").send().await.unwrap();
@@ -326,13 +296,14 @@ mod test {
         assert!(response.headers().get(X_CACHE_DIGEST).is_none());
         assert_eq!(response.text().await.unwrap(), BODY);
 
-        // Ensure no content directory
-        assert!(!cache.storage().body_path(DIGEST).exists());
+        // Ensure the body wasn't stored in the cache
+        assert!(!cache.storage().body_path(DIGEST).is_file());
     }
 
     #[tokio::test]
     async fn max_age() {
         const BODY: &str = "hello world!";
+        // Blake3 digest of the body (from https://emn178.github.io/online-tools/blake3/)
         const DIGEST: &str = "3aa61c409fd7717c9d9c639202af2fae470c0ef669be7ba2caea5779cb534e9d";
 
         let dir = tempdir().unwrap();
@@ -360,8 +331,8 @@ mod test {
         assert!(response.headers().get(X_CACHE_DIGEST).is_none());
         assert_eq!(response.text().await.unwrap(), BODY);
 
-        // Ensure a content directory exists
-        assert!(cache.storage().body_path(DIGEST).exists());
+        // Ensure the body was stored in the cache
+        assert!(cache.storage().body_path(DIGEST).is_file());
 
         // Second response should be served from the cache without revalidation
         // If a revalidation is made, the mock middleware will panic since there was
@@ -387,6 +358,7 @@ mod test {
     #[tokio::test]
     async fn cache_hit_unmodified() {
         const BODY: &str = "hello world!";
+        // Blake3 digest of the body (from https://emn178.github.io/online-tools/blake3/)
         const DIGEST: &str = "3aa61c409fd7717c9d9c639202af2fae470c0ef669be7ba2caea5779cb534e9d";
 
         let dir = tempdir().unwrap();
@@ -417,8 +389,8 @@ mod test {
         assert!(response.headers().get(X_CACHE_DIGEST).is_none());
         assert_eq!(response.text().await.unwrap(), BODY);
 
-        // Ensure there is a content directory
-        assert!(cache.storage().body_path(DIGEST).exists());
+        // Ensure the body was stored in the cache
+        assert!(cache.storage().body_path(DIGEST).is_file());
 
         // Assert no revalidation took place
         assert!(!revalidated.load(Ordering::SeqCst));
@@ -445,7 +417,9 @@ mod test {
     async fn cache_hit_modified() {
         const BODY: &str = "hello world!";
         const MODIFIED_BODY: &str = "hello world!!!";
+        // Blake3 digest of the body (from https://emn178.github.io/online-tools/blake3/)
         const DIGEST: &str = "3aa61c409fd7717c9d9c639202af2fae470c0ef669be7ba2caea5779cb534e9d";
+        // Blake3 digest of the modified body (from https://emn178.github.io/online-tools/blake3/)
         const MODIFIED_DIGEST: &str =
             "22b8d362b2e8064356915b1451f630d1d920b427d3b2f9b3432fbf4c03d94184";
 
@@ -478,8 +452,8 @@ mod test {
         assert!(response.headers().get(X_CACHE_DIGEST).is_none());
         assert_eq!(response.text().await.unwrap(), BODY);
 
-        // Ensure there is a content directory
-        assert!(cache.storage().body_path(DIGEST).exists());
+        // Ensure the body was stored in the cache
+        assert!(cache.storage().body_path(DIGEST).is_file());
 
         // Assert no revalidation took place
         assert!(!revalidated.load(Ordering::SeqCst));
@@ -491,8 +465,8 @@ mod test {
         assert!(response.headers().get(X_CACHE_DIGEST).is_none());
         assert_eq!(response.text().await.unwrap(), MODIFIED_BODY);
 
-        // Ensure there is a content directory
-        assert!(cache.storage().body_path(MODIFIED_DIGEST).exists());
+        // Ensure the body was stored in the cache
+        assert!(cache.storage().body_path(MODIFIED_DIGEST).is_file());
 
         // Assert a revalidation took place
         assert!(revalidated.swap(false, Ordering::SeqCst));

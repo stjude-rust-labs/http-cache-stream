@@ -5,19 +5,19 @@ use std::path::PathBuf;
 use anyhow::Result;
 use http::Response;
 use http::response::Parts;
+use http_body::Body;
 use http_cache_semantics::CachePolicy;
 
-use crate::HttpBody;
-use crate::body::Body;
+use crate::body::CacheBody;
 
 mod default;
 
 pub use default::*;
 
 /// Represents a response from storage.
-pub struct StoredResponse<B: HttpBody> {
+pub struct StoredResponse<B: Body> {
     /// The cached response.
-    pub response: Response<Body<B>>,
+    pub response: Response<CacheBody<B>>,
     /// The current cache policy.
     pub policy: CachePolicy,
     /// The response content digest.
@@ -32,7 +32,7 @@ pub trait CacheStorage: Send + Sync + 'static {
     ///
     /// Returns `Ok(None)` if a response does not exist in the storage for the
     /// given response key.
-    fn get<B: HttpBody>(
+    fn get<B: Body + Send>(
         &self,
         key: &str,
     ) -> impl Future<Output = Result<Option<StoredResponse<B>>>> + Send;
@@ -53,13 +53,13 @@ pub trait CacheStorage: Send + Sync + 'static {
     /// Stores a new response body in the cache.
     ///
     /// Returns a response with a body streaming to the cache.
-    fn store<B: HttpBody>(
+    fn store<B: Body + Send>(
         &self,
         key: String,
         parts: Parts,
         body: B,
         policy: CachePolicy,
-    ) -> impl Future<Output = Result<Response<Body<B>>>> + Send;
+    ) -> impl Future<Output = Result<Response<CacheBody<B>>>> + Send;
 
     /// Deletes a previously cached response for the given response key.
     ///
