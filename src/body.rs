@@ -323,7 +323,7 @@ impl Body for FileSource {
                         unsafe {
                             this.buf.advance_mut(n);
                         }
-                        Poll::Ready(Some(Ok(this.buf.split().freeze())))
+                        Poll::Ready(Some(Ok(Frame::data(this.buf.split().freeze()))))
                     }
                     Err(e) => {
                         *this.finished = true;
