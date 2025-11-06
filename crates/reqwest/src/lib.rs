@@ -185,8 +185,6 @@ impl<S: CacheStorage> reqwest_middleware::Middleware for Cache<S> {
 mod test {
     use std::sync::Arc;
     use std::sync::Mutex;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::atomic::Ordering;
 
     use http_cache_stream::http;
     use http_cache_stream::storage::DefaultCacheStorage;
@@ -361,12 +359,17 @@ mod test {
         // Blake3 digest of the body (from https://emn178.github.io/online-tools/blake3/)
         const DIGEST: &str = "3aa61c409fd7717c9d9c639202af2fae470c0ef669be7ba2caea5779cb534e9d";
 
+        #[derive(Default)]
+        struct State {
+            revalidated: bool,
+        }
+
         let dir = tempdir().unwrap();
-        let revalidated = Arc::new(AtomicBool::new(false));
-        let revalidated_clone = revalidated.clone();
+        let state = Arc::new(Mutex::new(State::default()));
+        let state_clone = state.clone();
         let cache = Arc::new(
             Cache::new(DefaultCacheStorage::new(dir.path())).with_revalidation_hook(move |_, _| {
-                revalidated_clone.store(true, Ordering::SeqCst);
+                state_clone.lock().unwrap().revalidated = true;
                 Ok(())
             }),
         );
@@ -393,7 +396,7 @@ mod test {
         assert!(cache.storage().body_path(DIGEST).is_file());
 
         // Assert no revalidation took place
-        assert!(!revalidated.load(Ordering::SeqCst));
+        assert!(!state.lock().unwrap().revalidated);
 
         // Second response should be served from the cache
         let response = client.get("http://test.local/").send().await.unwrap();
@@ -410,7 +413,7 @@ mod test {
         assert_eq!(response.text().await.unwrap(), BODY);
 
         // Assert a revalidation took place
-        assert!(revalidated.swap(false, Ordering::SeqCst));
+        assert!(state.lock().unwrap().revalidated);
     }
 
     #[tokio::test]
@@ -423,12 +426,17 @@ mod test {
         const MODIFIED_DIGEST: &str =
             "22b8d362b2e8064356915b1451f630d1d920b427d3b2f9b3432fbf4c03d94184";
 
+        #[derive(Default)]
+        struct State {
+            revalidated: bool,
+        }
+
         let dir = tempdir().unwrap();
-        let revalidated = Arc::new(AtomicBool::new(false));
-        let revalidated_clone = revalidated.clone();
+        let state = Arc::new(Mutex::new(State::default()));
+        let state_clone = state.clone();
         let cache = Arc::new(
             Cache::new(DefaultCacheStorage::new(dir.path())).with_revalidation_hook(move |_, _| {
-                revalidated_clone.store(true, Ordering::SeqCst);
+                state_clone.lock().unwrap().revalidated = true;
                 Ok(())
             }),
         );
@@ -456,7 +464,7 @@ mod test {
         assert!(cache.storage().body_path(DIGEST).is_file());
 
         // Assert no revalidation took place
-        assert!(!revalidated.load(Ordering::SeqCst));
+        assert!(!state.lock().unwrap().revalidated);
 
         // Second response should not be served from the cache (was modified)
         let response = client.get("http://test.local/").send().await.unwrap();
@@ -468,8 +476,8 @@ mod test {
         // Ensure the body was stored in the cache
         assert!(cache.storage().body_path(MODIFIED_DIGEST).is_file());
 
-        // Assert a revalidation took place
-        assert!(revalidated.swap(false, Ordering::SeqCst));
+        // Assert a revalidation took place and reset the flag back to false
+        assert!(std::mem::take(&mut state.lock().unwrap().revalidated));
 
         // Second response should be served from the cache (not modified)
         let response = client.get("http://test.local/").send().await.unwrap();
@@ -486,6 +494,6 @@ mod test {
         assert_eq!(response.text().await.unwrap(), MODIFIED_BODY);
 
         // Assert a revalidation took place
-        assert!(revalidated.swap(false, Ordering::SeqCst));
+        assert!(state.lock().unwrap().revalidated);
     }
 }
