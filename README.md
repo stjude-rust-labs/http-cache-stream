@@ -30,8 +30,8 @@
 
 ## Overview
 
-The `http-cache-stream` crate can be used to cache responses in accordance with
-HTTP caching semantics.
+The `http-cache-stream` crate can be used to cache streaming responses in
+accordance with HTTP caching semantics.
 
 ### How this crate differs from [`http-cache`][http-cache]
 
@@ -42,8 +42,9 @@ client APIs.
 The `http-cache-stream` crate is inspired by the implementation provided by
 `http-cache`, but differs in significant ways:
 
-* `http-cache-stream` supports streaming of requests/responses and does not
-  read a response body into memory to store in the cache.
+* ~~`http-cache-stream` supports streaming of requests/responses and does not
+  read a response body into memory to store in the cache.~~ (streaming is now
+  supported in `http-cache`)
 * The default storage implementation for `http-cache-stream` uses advisory file
   locking to coordinate access to storage across multiple processes and threads.
 * The default storage implementation is simple and provides no integrity of

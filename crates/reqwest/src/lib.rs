@@ -27,22 +27,16 @@
 #![warn(clippy::missing_docs_in_private_items)]
 #![warn(rustdoc::broken_intra_doc_links)]
 
-use std::io;
-use std::pin::Pin;
-use std::task::Context;
-use std::task::Poll;
-
 use anyhow::Context as _;
 use anyhow::Result;
-use bytes::Bytes;
 use futures::FutureExt;
 use futures::future::BoxFuture;
+use http_body_util::BodyDataStream;
 pub use http_cache_stream::X_CACHE;
 pub use http_cache_stream::X_CACHE_DIGEST;
 pub use http_cache_stream::X_CACHE_LOOKUP;
 use http_cache_stream::http::Extensions;
 use http_cache_stream::http::Uri;
-use http_cache_stream::http_body::Frame;
 pub use http_cache_stream::semantics;
 pub use http_cache_stream::semantics::CacheOptions;
 pub use http_cache_stream::storage;
@@ -53,29 +47,6 @@ use reqwest::Response;
 use reqwest::ResponseBuilderExt;
 use reqwest::header::HeaderMap;
 use reqwest_middleware::Next;
-
-pin_project_lite::pin_project! {
-    /// Adapter for [`Body`] to implement `HttpBody`.
-    struct MiddlewareBody {
-        #[pin]
-        body: Body
-    }
-}
-
-impl http_cache_stream::http_body::Body for MiddlewareBody {
-    type Data = Bytes;
-    type Error = io::Error;
-
-    fn poll_frame(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
-        // The two body implementations differ on error type, so map it here
-        self.project().body.poll_frame(cx).map_err(io::Error::other)
-    }
-}
-
-impl http_cache_stream::HttpBody for MiddlewareBody {}
 
 /// Represents a request flowing through the cache middleware.
 struct MiddlewareRequest<'a, 'b> {
@@ -89,7 +60,7 @@ struct MiddlewareRequest<'a, 'b> {
     extensions: &'b mut Extensions,
 }
 
-impl http_cache_stream::Request<MiddlewareBody> for MiddlewareRequest<'_, '_> {
+impl http_cache_stream::Request<Body> for MiddlewareRequest<'_, '_> {
     fn version(&self) -> http_cache_stream::http::Version {
         self.request.version()
     }
@@ -109,7 +80,7 @@ impl http_cache_stream::Request<MiddlewareBody> for MiddlewareRequest<'_, '_> {
     async fn send(
         mut self,
         headers: Option<http_cache_stream::http::HeaderMap>,
-    ) -> anyhow::Result<http_cache_stream::http::Response<MiddlewareBody>> {
+    ) -> anyhow::Result<http_cache_stream::http::Response<Body>> {
         // Override the specified headers
         if let Some(headers) = headers {
             self.request.headers_mut().extend(headers);
@@ -133,9 +104,7 @@ impl http_cache_stream::Request<MiddlewareBody> for MiddlewareRequest<'_, '_> {
             .expect("should have headers")
             .extend(headers);
         builder
-            .body(MiddlewareBody {
-                body: Body::wrap_stream(response.bytes_stream()),
-            })
+            .body(response.into())
             .context("failed to create response")
     }
 }
@@ -205,9 +174,326 @@ impl<S: CacheStorage> reqwest_middleware::Middleware for Cache<S> {
                 .0
                 .send(request)
                 .await
-                .map(|r| r.map(Body::wrap_stream).into())?;
+                .map(|r| r.map(|b| Body::wrap_stream(BodyDataStream::new(b))).into())?;
             Ok(response)
         }
         .boxed()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    use http_cache_stream::http;
+    use http_cache_stream::storage::DefaultCacheStorage;
+    use reqwest::Response;
+    use reqwest::StatusCode;
+    use reqwest::header;
+    use reqwest_middleware::ClientWithMiddleware;
+    use reqwest_middleware::Middleware;
+    use tempfile::tempdir;
+
+    use super::*;
+
+    struct MockMiddlewareState {
+        responses: Vec<Option<Response>>,
+        current: usize,
+    }
+
+    struct MockMiddleware(Mutex<MockMiddlewareState>);
+
+    impl MockMiddleware {
+        fn new<R>(responses: impl IntoIterator<Item = R>) -> Self
+        where
+            R: Into<Response>,
+        {
+            Self(Mutex::new(MockMiddlewareState {
+                responses: responses.into_iter().map(|r| Some(r.into())).collect(),
+                current: 0,
+            }))
+        }
+    }
+
+    impl Middleware for MockMiddleware {
+        fn handle<'a, 'b, 'c, 'd>(
+            &'a self,
+            _: Request,
+            _: &'b mut Extensions,
+            _: Next<'c>,
+        ) -> BoxFuture<'d, reqwest_middleware::Result<Response>>
+        where
+            'a: 'd,
+            'b: 'd,
+            'c: 'd,
+            Self: 'd,
+        {
+            async {
+                let mut state = self.0.lock().unwrap();
+
+                let current = state.current;
+                state.current += 1;
+
+                Ok(state
+                    .responses
+                    .get_mut(current)
+                    .expect("unexpected client request: not enough responses defined")
+                    .take()
+                    .unwrap())
+            }
+            .boxed()
+        }
+    }
+
+    #[tokio::test]
+    async fn no_store() {
+        const BODY: &str = "hello world!";
+        // Blake3 digest of the body (from https://emn178.github.io/online-tools/blake3/)
+        const DIGEST: &str = "3aa61c409fd7717c9d9c639202af2fae470c0ef669be7ba2caea5779cb534e9d";
+
+        let dir = tempdir().unwrap();
+        let cache = Arc::new(Cache::new(DefaultCacheStorage::new(dir.path())));
+        let mock = Arc::new(MockMiddleware::new([
+            http::Response::builder()
+                .header(header::CACHE_CONTROL, "no-store")
+                .body(BODY)
+                .unwrap(),
+            http::Response::builder()
+                .header(header::CACHE_CONTROL, "no-store")
+                .body(BODY)
+                .unwrap(),
+        ]));
+        let client = ClientWithMiddleware::new(
+            Default::default(),
+            vec![cache.clone() as Arc<dyn Middleware>, mock.clone()],
+        );
+
+        // Response should not be served from the cache or stored
+        let response = client.get("http://test.local/").send().await.unwrap();
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "MISS");
+        assert_eq!(response.headers().get(X_CACHE).unwrap(), "MISS");
+        assert!(response.headers().get(X_CACHE_DIGEST).is_none());
+        assert_eq!(response.text().await.unwrap(), BODY);
+
+        // Ensure the body wasn't stored in the cache
+        assert!(!cache.storage().body_path(DIGEST).is_file());
+
+        // Response should *still* not be served from the cache or stored
+        let response = client.get("http://test.local/").send().await.unwrap();
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "MISS");
+        assert_eq!(response.headers().get(X_CACHE).unwrap(), "MISS");
+        assert!(response.headers().get(X_CACHE_DIGEST).is_none());
+        assert_eq!(response.text().await.unwrap(), BODY);
+
+        // Ensure the body wasn't stored in the cache
+        assert!(!cache.storage().body_path(DIGEST).is_file());
+    }
+
+    #[tokio::test]
+    async fn max_age() {
+        const BODY: &str = "hello world!";
+        // Blake3 digest of the body (from https://emn178.github.io/online-tools/blake3/)
+        const DIGEST: &str = "3aa61c409fd7717c9d9c639202af2fae470c0ef669be7ba2caea5779cb534e9d";
+
+        let dir = tempdir().unwrap();
+        let cache = Arc::new(
+            Cache::new(DefaultCacheStorage::new(dir.path()))
+                .with_revalidation_hook(|_, _| panic!("a revalidation should not take place")),
+        );
+        let mock = Arc::new(MockMiddleware::new([http::Response::builder()
+            .header(header::CACHE_CONTROL, "max-age=1000")
+            .body(BODY)
+            .unwrap()]));
+        let client = ClientWithMiddleware::new(
+            Default::default(),
+            vec![cache.clone() as Arc<dyn Middleware>, mock.clone()],
+        );
+
+        // First response should not be served from the cache
+        let response = client.get("http://test.local/").send().await.unwrap();
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "max-age=1000"
+        );
+        assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "MISS");
+        assert_eq!(response.headers().get(X_CACHE).unwrap(), "MISS");
+        assert!(response.headers().get(X_CACHE_DIGEST).is_none());
+        assert_eq!(response.text().await.unwrap(), BODY);
+
+        // Ensure the body was stored in the cache
+        assert!(cache.storage().body_path(DIGEST).is_file());
+
+        // Second response should be served from the cache without revalidation
+        // If a revalidation is made, the mock middleware will panic since there was
+        // only one response defined
+        let response = client.get("http://test.local/").send().await.unwrap();
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "max-age=1000"
+        );
+        assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "HIT");
+        assert_eq!(response.headers().get(X_CACHE).unwrap(), "HIT");
+        assert_eq!(
+            response
+                .headers()
+                .get(X_CACHE_DIGEST)
+                .map(|v| v.to_str().unwrap())
+                .unwrap(),
+            DIGEST
+        );
+        assert_eq!(response.text().await.unwrap(), BODY);
+    }
+
+    #[tokio::test]
+    async fn cache_hit_unmodified() {
+        const BODY: &str = "hello world!";
+        // Blake3 digest of the body (from https://emn178.github.io/online-tools/blake3/)
+        const DIGEST: &str = "3aa61c409fd7717c9d9c639202af2fae470c0ef669be7ba2caea5779cb534e9d";
+
+        #[derive(Default)]
+        struct State {
+            revalidated: bool,
+        }
+
+        let dir = tempdir().unwrap();
+        let state = Arc::new(Mutex::new(State::default()));
+        let state_clone = state.clone();
+        let cache = Arc::new(
+            Cache::new(DefaultCacheStorage::new(dir.path())).with_revalidation_hook(move |_, _| {
+                state_clone.lock().unwrap().revalidated = true;
+                Ok(())
+            }),
+        );
+        let mock = Arc::new(MockMiddleware::new([
+            http::Response::builder().body(BODY).unwrap(),
+            http::Response::builder()
+                .status(StatusCode::NOT_MODIFIED)
+                .body("")
+                .unwrap(),
+        ]));
+        let client = ClientWithMiddleware::new(
+            Default::default(),
+            vec![cache.clone() as Arc<dyn Middleware>, mock.clone()],
+        );
+
+        // First response should be a miss
+        let response = client.get("http://test.local/").send().await.unwrap();
+        assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "MISS");
+        assert_eq!(response.headers().get(X_CACHE).unwrap(), "MISS");
+        assert!(response.headers().get(X_CACHE_DIGEST).is_none());
+        assert_eq!(response.text().await.unwrap(), BODY);
+
+        // Ensure the body was stored in the cache
+        assert!(cache.storage().body_path(DIGEST).is_file());
+
+        // Assert no revalidation took place
+        assert!(!state.lock().unwrap().revalidated);
+
+        // Second response should be served from the cache
+        let response = client.get("http://test.local/").send().await.unwrap();
+        assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "HIT");
+        assert_eq!(response.headers().get(X_CACHE).unwrap(), "HIT");
+        assert_eq!(
+            response
+                .headers()
+                .get(X_CACHE_DIGEST)
+                .map(|v| v.to_str().unwrap())
+                .unwrap(),
+            DIGEST
+        );
+        assert_eq!(response.text().await.unwrap(), BODY);
+
+        // Assert a revalidation took place
+        assert!(state.lock().unwrap().revalidated);
+    }
+
+    #[tokio::test]
+    async fn cache_hit_modified() {
+        const BODY: &str = "hello world!";
+        const MODIFIED_BODY: &str = "hello world!!!";
+        // Blake3 digest of the body (from https://emn178.github.io/online-tools/blake3/)
+        const DIGEST: &str = "3aa61c409fd7717c9d9c639202af2fae470c0ef669be7ba2caea5779cb534e9d";
+        // Blake3 digest of the modified body (from https://emn178.github.io/online-tools/blake3/)
+        const MODIFIED_DIGEST: &str =
+            "22b8d362b2e8064356915b1451f630d1d920b427d3b2f9b3432fbf4c03d94184";
+
+        #[derive(Default)]
+        struct State {
+            revalidated: bool,
+        }
+
+        let dir = tempdir().unwrap();
+        let state = Arc::new(Mutex::new(State::default()));
+        let state_clone = state.clone();
+        let cache = Arc::new(
+            Cache::new(DefaultCacheStorage::new(dir.path())).with_revalidation_hook(move |_, _| {
+                state_clone.lock().unwrap().revalidated = true;
+                Ok(())
+            }),
+        );
+        let mock = Arc::new(MockMiddleware::new([
+            http::Response::builder().body(BODY).unwrap(),
+            http::Response::builder().body(MODIFIED_BODY).unwrap(),
+            http::Response::builder()
+                .status(StatusCode::NOT_MODIFIED)
+                .body("")
+                .unwrap(),
+        ]));
+        let client = ClientWithMiddleware::new(
+            Default::default(),
+            vec![cache.clone() as Arc<dyn Middleware>, mock.clone()],
+        );
+
+        // First response should be a miss
+        let response = client.get("http://test.local/").send().await.unwrap();
+        assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "MISS");
+        assert_eq!(response.headers().get(X_CACHE).unwrap(), "MISS");
+        assert!(response.headers().get(X_CACHE_DIGEST).is_none());
+        assert_eq!(response.text().await.unwrap(), BODY);
+
+        // Ensure the body was stored in the cache
+        assert!(cache.storage().body_path(DIGEST).is_file());
+
+        // Assert no revalidation took place
+        assert!(!state.lock().unwrap().revalidated);
+
+        // Second response should not be served from the cache (was modified)
+        let response = client.get("http://test.local/").send().await.unwrap();
+        assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "HIT");
+        assert_eq!(response.headers().get(X_CACHE).unwrap(), "MISS");
+        assert!(response.headers().get(X_CACHE_DIGEST).is_none());
+        assert_eq!(response.text().await.unwrap(), MODIFIED_BODY);
+
+        // Ensure the body was stored in the cache
+        assert!(cache.storage().body_path(MODIFIED_DIGEST).is_file());
+
+        // Assert a revalidation took place and reset the flag back to false
+        assert!(std::mem::take(&mut state.lock().unwrap().revalidated));
+
+        // Second response should be served from the cache (not modified)
+        let response = client.get("http://test.local/").send().await.unwrap();
+        assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "HIT");
+        assert_eq!(response.headers().get(X_CACHE).unwrap(), "HIT");
+        assert_eq!(
+            response
+                .headers()
+                .get(X_CACHE_DIGEST)
+                .map(|v| v.to_str().unwrap())
+                .unwrap(),
+            MODIFIED_DIGEST
+        );
+        assert_eq!(response.text().await.unwrap(), MODIFIED_BODY);
+
+        // Assert a revalidation took place
+        assert!(state.lock().unwrap().revalidated);
     }
 }

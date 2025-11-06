@@ -10,13 +10,14 @@ homepage = { workspace = true }
 repository = { workspace = true }
 
 [dependencies]
-http-cache-stream = { path = "../.." , version = "0.2.0" }
 anyhow = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+http-body-util = { workspace = true }
+http-cache-stream = { path = "../..", version = "0.2.0" }
 reqwest = { workspace = true, features = ["stream"] }
 reqwest-middleware = { workspace = true }
-futures = { workspace = true }
-bytes = { workspace = true }
-pin-project-lite = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }

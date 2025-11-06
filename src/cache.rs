@@ -1,15 +1,9 @@
 //! Implementation of the HTTP cache.
 
 use std::fmt;
-use std::io;
-use std::pin::Pin;
-use std::task::Context;
-use std::task::Poll;
-use std::task::ready;
 use std::time::SystemTime;
 
 use anyhow::Result;
-use bytes::Bytes;
 use http::HeaderMap;
 use http::HeaderValue;
 use http::Method;
@@ -20,6 +14,7 @@ use http::Version;
 use http::header;
 use http::header::CACHE_CONTROL;
 use http::uri::Authority;
+use http_body::Body;
 use http_cache_semantics::AfterResponse;
 use http_cache_semantics::BeforeRequest;
 use http_cache_semantics::CacheOptions;
@@ -28,7 +23,7 @@ use sha2::Digest;
 use sha2::Sha256;
 use tracing::debug;
 
-use crate::body::Body;
+use crate::body::CacheBody;
 use crate::storage::CacheStorage;
 use crate::storage::StoredResponse;
 
@@ -206,31 +201,11 @@ impl<B> ResponseExt for Response<B> {
     }
 }
 
-/// Represents the supported HTTP body trait from middleware integrations.
-pub trait HttpBody: http_body::Body<Data = Bytes, Error = io::Error> + Send {
-    /// Polls the next data frame as bytes.
-    ///
-    /// Returns end of stream after all data frames, thereby ignoring trailers.
-    fn poll_next_data(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<io::Result<Bytes>>> {
-        match ready!(self.poll_frame(cx)) {
-            Some(Ok(frame)) => match frame.into_data().ok() {
-                Some(data) => Poll::Ready(Some(Ok(data))),
-                None => Poll::Ready(None),
-            },
-            Some(Err(e)) => Poll::Ready(Some(Err(e))),
-            None => Poll::Ready(None),
-        }
-    }
-}
-
 /// An abstraction of an HTTP request.
 ///
 /// This trait is used in HTTP middleware integrations to abstract the request
 /// type and sending the request upstream.
-pub trait Request<B: HttpBody>: Send {
+pub trait Request<B: Body>: Send {
     /// Gets the request's version.
     fn version(&self) -> Version;
 
@@ -262,7 +237,7 @@ struct RequestLike {
 
 impl RequestLike {
     /// Constructs a new `RequestLike` for the given request.
-    fn new<R: Request<B>, B: HttpBody>(request: &R) -> Self {
+    fn new<R: Request<B>, B: Body>(request: &R) -> Self {
         // Unfortunate we have to clone the header map here
         Self {
             method: request.method().clone(),
@@ -382,7 +357,10 @@ where
     ///
     /// If a previous response is not in the cache, the request is sent upstream
     /// and the response is cached, if it is cacheable.
-    pub async fn send<B: HttpBody>(&self, request: impl Request<B>) -> Result<Response<Body<B>>> {
+    pub async fn send<B: Body + Send>(
+        &self,
+        request: impl Request<B>,
+    ) -> Result<Response<CacheBody<B>>> {
         let method = request.method();
         let uri = request.uri();
 
@@ -433,12 +411,12 @@ where
     /// Sends the original request upstream.
     ///
     /// Caches the response if the response is cacheable.
-    async fn send_upstream<B: HttpBody>(
+    async fn send_upstream<B: Body + Send>(
         &self,
         key: String,
         request: impl Request<B>,
         lookup_status: CacheLookupStatus,
-    ) -> Result<Response<Body<B>>> {
+    ) -> Result<Response<CacheBody<B>>> {
         let request_like: RequestLike = RequestLike::new(&request);
 
         let mut response = request.send(None).await?;
@@ -498,7 +476,7 @@ where
             }
         }
 
-        Ok(response.map(Body::from_upstream))
+        Ok(response.map(CacheBody::from_upstream))
     }
 
     /// Performs a conditional send to upstream.
@@ -506,12 +484,12 @@ where
     /// If a cached request is still fresh, it is returned.
     ///
     /// If a cached request is stale, an attempt is made to revalidate it.
-    async fn conditional_send_upstream<B: HttpBody>(
+    async fn conditional_send_upstream<B: Body + Send>(
         &self,
         key: String,
         request: impl Request<B>,
         mut stored: StoredResponse<B>,
-    ) -> Result<Response<Body<B>>> {
+    ) -> Result<Response<CacheBody<B>>> {
         let request_like = RequestLike::new(&request);
 
         let mut headers = match stored
@@ -723,7 +701,7 @@ where
 
                 // Otherwise, don't serve the cached response at all
                 response.set_cache_status(CacheLookupStatus::Hit, CacheStatus::Miss, None);
-                Ok(response.map(Body::from_upstream))
+                Ok(response.map(CacheBody::from_upstream))
             }
             Err(e) => {
                 if stored.response.must_revalidate() {
@@ -752,7 +730,7 @@ where
     }
 
     /// Prepares a stale response for sending back to the client.
-    fn prepare_stale_response<B>(uri: &Uri, response: &mut Response<Body<B>>, digest: &str) {
+    fn prepare_stale_response<B>(uri: &Uri, response: &mut Response<CacheBody<B>>, digest: &str) {
         // If the server failed to give us a response, add the required warning to the
         // cached response:
         //   111 Revalidation failed
