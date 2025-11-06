@@ -482,11 +482,9 @@ impl DefaultCacheStorageInner {
 
 #[cfg(all(test, feature = "tokio"))]
 mod test {
-    use bytes::Bytes;
     use futures::StreamExt;
     use http::Request;
     use http_body_util::BodyDataStream;
-    use http_body_util::Full;
     use http_cache_semantics::CachePolicy;
     use tempfile::tempdir;
 
@@ -517,11 +515,11 @@ mod test {
         let storage = DefaultCacheStorage::new(dir.path());
 
         // Assert the key doesn't currently exist in the cache
-        assert!(storage.get::<Full<Bytes>>(KEY).await.unwrap().is_none());
+        assert!(storage.get::<String>(KEY).await.unwrap().is_none());
 
         // Store a response in the cache
         let request = Request::builder().body("").unwrap();
-        let response = Response::builder().body(Full::<Bytes>::from(BODY)).unwrap();
+        let response = Response::builder().body(BODY.to_string()).unwrap();
         let policy: CachePolicy = CachePolicy::new(&request, &response);
 
         let (parts, body) = response.into_parts();
@@ -538,7 +536,7 @@ mod test {
         drop(stream);
 
         // Lookup the cache entry (should exist now, without the header)
-        let cached = storage.get::<Full<Bytes>>(KEY).await.unwrap().unwrap();
+        let cached = storage.get::<String>(KEY).await.unwrap().unwrap();
         assert!(cached.response.headers().get(HEADER_NAME).is_none());
 
         // Read the cached response
@@ -553,7 +551,7 @@ mod test {
         // Create an "updated" response and put it into the cache with the same body
         let response = Response::builder()
             .header(HEADER_NAME, HEADER_VALUE)
-            .body(Full::<Bytes>::from(BODY))
+            .body(BODY.to_string())
             .unwrap();
         let policy = CachePolicy::new(&request, &response);
 
@@ -561,7 +559,7 @@ mod test {
         storage.put(KEY, &parts, &policy, DIGEST).await.unwrap();
 
         // Lookup the cache entry (should exist with the header)
-        let cached = storage.get::<Full<Bytes>>(KEY).await.unwrap().unwrap();
+        let cached = storage.get::<String>(KEY).await.unwrap().unwrap();
         assert_eq!(
             cached
                 .response
@@ -582,6 +580,6 @@ mod test {
 
         // Delete the key and ensure it no longer exists
         storage.delete(KEY).await.unwrap();
-        assert!(storage.get::<Full<Bytes>>(KEY).await.unwrap().is_none());
+        assert!(storage.get::<String>(KEY).await.unwrap().is_none());
     }
 }
