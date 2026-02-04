@@ -358,11 +358,7 @@ impl DefaultCacheStorageInner {
         };
 
         // Decode the cached response
-        Ok(
-            bincode::serde::decode_from_std_read::<CachedResponse, _, _>(
-                &mut response,
-                bincode::config::standard(),
-            )
+        Ok(bincode::deserialize_from(&mut response)
             .inspect_err(|e| {
                 debug!(
                     "failed to deserialize response file `{path}`: {e} (cache entry will be \
@@ -370,8 +366,7 @@ impl DefaultCacheStorageInner {
                     path = self.response_path(key).display()
                 );
             })
-            .ok(),
-        )
+            .ok())
     }
 
     /// Writes a response to storage for the given key.
@@ -382,7 +377,7 @@ impl DefaultCacheStorageInner {
         let mut file = self.lock_response_exclusive(key).await?;
 
         // Encode the response
-        bincode::serde::encode_into_std_write(response, &mut file, bincode::config::standard())
+        bincode::serialize_into(&mut file, &response)
             .with_context(|| format!("failed to serialize response data for cache key `{key}`"))
             .map(|_| ())
     }
