@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## 0.4.0 - 02-04-2026
+
+#### Changed
+
+* Dependencies were updated to latest ([#18](https://github.com/stjude-rust-labs/http-cache-stream/pull/18)).
+
 ## 0.3.0 - 11-06-2025
 
 #### Added
