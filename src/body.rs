@@ -9,7 +9,6 @@ use std::task::ready;
 
 use anyhow::Context as _;
 use anyhow::Result;
-use blake3::Hasher;
 use bytes::Bytes;
 use bytes::BytesMut;
 use futures::Stream;
@@ -43,10 +42,8 @@ pin_project! {
             path: Option<TempPath>,
             // The current bytes read from the upstream body.
             current: Bytes,
-            // The hasher used to hash the body.
-            hasher: Hasher,
             // The callback to invoke once the cache file is completed.
-            callback: Option<Box<dyn FnOnce(String, TempPath) -> BoxFuture<'static, Result<()>> + Send>>,
+            callback: Option<Box<dyn FnOnce(TempPath) -> BoxFuture<'static, Result<()>> + Send>>,
         },
         /// The cache file is being flushed.
         FlushingFile {
@@ -55,10 +52,8 @@ pin_project! {
             writer: Option<runtime::BufWriter<runtime::File>>,
             // The temporary path of the cache file.
             path: Option<TempPath>,
-            // The digest of the response body.
-            digest: String,
             // The callback to invoke once the cache file is completed.
-            callback: Option<Box<dyn FnOnce(String, TempPath) -> BoxFuture<'static, Result<()>> + Send>>,
+            callback: Option<Box<dyn FnOnce(TempPath) -> BoxFuture<'static, Result<()>> + Send>>,
         },
         /// The callback is being invoked.
         InvokingCallback {
@@ -85,7 +80,7 @@ impl<B> CachingUpstreamSource<B> {
     /// The callback is invoked after the body has been written to the cache.
     async fn new<F>(upstream: B, temp_dir: &Path, callback: F) -> Result<Self>
     where
-        F: FnOnce(String, TempPath) -> BoxFuture<'static, Result<()>> + Send + 'static,
+        F: FnOnce(TempPath) -> BoxFuture<'static, Result<()>> + Send + 'static,
     {
         let path = NamedTempFile::new_in(temp_dir)
             .context("failed to create temporary body file for cache storage")?
@@ -105,7 +100,6 @@ impl<B> CachingUpstreamSource<B> {
                 path: Some(path),
                 callback: Some(Box::new(callback)),
                 current: Bytes::new(),
-                hasher: Hasher::new(),
             },
         })
     }
@@ -132,7 +126,6 @@ where
                     mut writer,
                     path,
                     current,
-                    hasher,
                     callback,
                 } => {
                     // Check to see if a read is needed
@@ -142,8 +135,6 @@ where
                                 let frame = frame.map_data(Into::into);
                                 match frame.into_data() {
                                     Ok(data) if !data.is_empty() => {
-                                        // Update the hasher with the data that was read
-                                        hasher.update(&data);
                                         *current = data;
                                     }
                                     Ok(_) => continue,
@@ -160,7 +151,6 @@ where
                             None => {
                                 let writer = writer.take();
                                 let path = path.take();
-                                let digest = hex::encode(hasher.finalize().as_bytes());
                                 let callback = callback.take();
 
                                 // We're done reading from upstream, transition to the flushing
@@ -169,7 +159,6 @@ where
                                     state: CachingUpstreamSourceState::FlushingFile {
                                         writer,
                                         path,
-                                        digest,
                                         callback,
                                     },
                                 });
@@ -196,7 +185,6 @@ where
                 ProjectedCachingUpstreamSourceState::FlushingFile {
                     mut writer,
                     path,
-                    digest,
                     callback,
                 } => {
                     // Attempt to poll the writer for flush
@@ -204,11 +192,10 @@ where
                         Ok(_) => {
                             drop(writer.take());
                             let path = path.take().unwrap();
-                            let digest = std::mem::take(digest);
                             let callback = callback.take().unwrap();
 
                             // Invoke the callback and transition to the invoking callback state
-                            let future = callback(digest, path);
+                            let future = callback(path);
                             self.set(Self {
                                 state: CachingUpstreamSourceState::InvokingCallback { future },
                             });
@@ -401,7 +388,7 @@ where
         callback: F,
     ) -> Result<Self>
     where
-        F: FnOnce(String, TempPath) -> BoxFuture<'static, Result<()>> + Send + 'static,
+        F: FnOnce(TempPath) -> BoxFuture<'static, Result<()>> + Send + 'static,
     {
         Ok(Self {
             source: BodySource::CachingUpstream {

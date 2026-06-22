@@ -19,6 +19,8 @@ use http_body::Body;
 use http_cache_semantics::CachePolicy;
 use serde::Deserialize;
 use serde::Serialize;
+use tempfile::TempPath;
+use tokio::fs::remove_file;
 use tracing::debug;
 
 use super::StoredResponse;
@@ -54,9 +56,6 @@ struct CachedResponseRef<'a> {
     #[serde(with = "http_serde::header_map")]
     headers: &'a HeaderMap,
 
-    /// The content digest of the response.
-    digest: &'a str,
-
     /// The last used cached policy.
     policy: &'a CachePolicy,
 }
@@ -78,9 +77,6 @@ struct CachedResponse {
     #[serde(with = "http_serde::header_map")]
     headers: HeaderMap,
 
-    /// The content digest of the response.
-    digest: String,
-
     /// The last used cached policy.
     policy: CachePolicy,
 }
@@ -99,23 +95,22 @@ struct CachedResponse {
 /// │  │  ├─ <key>
 /// │  │  ├─ ...
 /// │  ├─ content/
-/// │  │  ├─ <digest>
-/// │  │  ├─ <digest>
+/// │  │  ├─ <key>
+/// │  │  ├─ <key>
 /// │  │  ├─ ...
 /// │  ├─ tmp/
 /// ```
 ///
 /// Where `<root>` is the root storage directory, `<storage-version>` is a
-/// constant that changes when the directory layout changes (currently `v1`),
-/// `<key>` is supplied by the cache, and `<digest>` is the calculated digest of
-/// a response body.
+/// constant that changes when the directory layout changes (currently `v1`) and
+/// `<key>` is supplied by the cache.
 ///
 /// ## The `responses` directory
 ///
 /// The `responses` directory contains a file for each cached response.
 ///
 /// The file is a bincode-serialized `CachedResponse` that contains information
-/// about the response, including the response body content digest.
+/// about the response.
 ///
 /// ### Response file locking
 ///
@@ -129,18 +124,12 @@ struct CachedResponse {
 ///
 /// The `content` directory contains a file for each cached response body.
 ///
-/// The file name is the digest of the response body contents.
-///
-/// Currently the [`blake3`][blake3] hash algorithm is used for calculating
-/// response body digests.
+/// The file name is the key supplied by the cache.
 ///
 /// ## The `tmp` directory
 ///
 /// The `tmp` directory is used for temporarily storing response bodies as they
 /// are saved to the cache.
-///
-/// The content digest of the response is calculated as the response is written
-/// into temporary storage.
 ///
 /// Once the response body has been fully read, the temporary file is atomically
 /// renamed to its content directory location; if the content already exists,
@@ -159,8 +148,6 @@ struct CachedResponse {
 /// If an error occurs while updating a cache entry with
 /// [`DefaultCacheStorage::put`], a future [`DefaultCacheStorage::get`] call
 /// will treat the entry as not present.
-///
-/// [blake3]: https://github.com/BLAKE3-team/BLAKE3
 #[derive(Clone)]
 pub struct DefaultCacheStorage(Arc<DefaultCacheStorageInner>);
 
@@ -179,7 +166,7 @@ impl CacheStorage for DefaultCacheStorage {
         };
 
         // Open the response body
-        let path = self.body_path(&cached.digest);
+        let path = self.body_path(key);
         let body = match runtime::File::open(&path)
             .await
             .map(Some)
@@ -217,17 +204,10 @@ impl CacheStorage for DefaultCacheStorage {
                 })?)
                 .expect("should be valid"),
             policy: cached.policy,
-            digest: cached.digest,
         }))
     }
 
-    async fn put(
-        &self,
-        key: &str,
-        parts: &Parts,
-        policy: &CachePolicy,
-        digest: &str,
-    ) -> Result<()> {
+    async fn put(&self, key: &str, parts: &Parts, policy: &CachePolicy) -> Result<()> {
         self.0
             .write_response(
                 key,
@@ -235,9 +215,9 @@ impl CacheStorage for DefaultCacheStorage {
                     status: parts.status,
                     version: parts.version,
                     headers: &parts.headers,
-                    digest,
                     policy,
                 },
+                None,
             )
             .await
     }
@@ -260,25 +240,13 @@ impl CacheStorage for DefaultCacheStorage {
         })?;
 
         // Create a new caching body from the upstream body
-        // The provided callback will be invoked once the cache file hsa been completed
+        // The provided callback will be invoked once the stream has completed
         let status = parts.status;
         let version = parts.version;
         let headers = parts.headers.clone();
 
-        let body = CacheBody::from_caching_upstream(body, &temp_dir, move |digest, path| {
+        let body = CacheBody::from_caching_upstream(body, &temp_dir, move |content| {
             async move {
-                let content_path = inner.content_path(&digest);
-                fs::create_dir_all(content_path.parent().expect("should have parent"))
-                    .context("failed to create content directory")?;
-
-                // Atomically persist the temp file into the `content` location
-                path.persist(&content_path).with_context(|| {
-                    format!(
-                        "failed to persist downloaded body to content path `{path}`",
-                        path = content_path.display()
-                    )
-                })?;
-
                 // Update the response
                 inner
                     .write_response(
@@ -287,14 +255,13 @@ impl CacheStorage for DefaultCacheStorage {
                             status,
                             version,
                             headers: &headers,
-                            digest: &digest,
                             policy: &policy,
                         },
+                        Some(content),
                     )
                     .await?;
 
-                debug!(key, digest, "response body stored successfully");
-
+                debug!(key, "response body stored successfully");
                 Ok(())
             }
             .boxed()
@@ -308,12 +275,16 @@ impl CacheStorage for DefaultCacheStorage {
         // Acquire an exclusive lock on the response file
         // By acquiring the lock, we truncate the file; any attempt to deserialize an
         // empty response file will fail and be treated as not-present
-        self.0.lock_response_exclusive(key).await?;
+        let _lock = self.0.lock_response_exclusive(key).await?;
+
+        // Delete the associated content file
+        let _ = remove_file(self.0.content_path(key)).await;
+
         Ok(())
     }
 
-    fn body_path(&self, digest: &str) -> PathBuf {
-        self.0.content_path(digest)
+    fn body_path(&self, key: &str) -> PathBuf {
+        self.0.content_path(key)
     }
 }
 
@@ -331,11 +302,11 @@ impl DefaultCacheStorageInner {
     }
 
     /// Calculates the path to a content file.
-    fn content_path(&self, digest: &str) -> PathBuf {
+    fn content_path(&self, key: &str) -> PathBuf {
         let mut path = self.0.to_path_buf();
         path.push(STORAGE_VERSION);
         path.push(CONTENT_DIRECTORY_NAME);
-        path.push(digest);
+        path.push(key);
         path
     }
 
@@ -372,14 +343,35 @@ impl DefaultCacheStorageInner {
     /// Writes a response to storage for the given key.
     ///
     /// This method will block if the response file is locked.
-    async fn write_response(&self, key: &str, response: CachedResponseRef<'_>) -> Result<()> {
+    async fn write_response(
+        &self,
+        key: &str,
+        response: CachedResponseRef<'_>,
+        content: Option<TempPath>,
+    ) -> Result<()> {
         // Acquire a shared lock on the response file
         let mut file = self.lock_response_exclusive(key).await?;
 
         // Encode the response
         bincode::serialize_into(&mut file, &response)
             .with_context(|| format!("failed to serialize response data for cache key `{key}`"))
-            .map(|_| ())
+            .map(|_| ())?;
+
+        if let Some(content) = content {
+            let content_path = self.content_path(key);
+            fs::create_dir_all(content_path.parent().expect("should have parent"))
+                .context("failed to create content directory")?;
+
+            // Atomically persist the temporary content file into the content location
+            content.persist(&content_path).with_context(|| {
+                format!(
+                    "failed to persist downloaded body to content path `{path}`",
+                    path = content_path.display()
+                )
+            })?;
+        }
+
+        Ok(())
     }
 
     /// Locks a response file for shared access.
@@ -502,7 +494,6 @@ mod test {
     async fn cache_hit() {
         const KEY: &str = "key";
         const BODY: &str = "hello world";
-        const DIGEST: &str = "d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24";
         const HEADER_NAME: &str = "foo";
         const HEADER_VALUE: &str = "bar";
 
@@ -541,7 +532,6 @@ mod test {
             .unwrap()
             .unwrap();
         assert_eq!(data, BODY);
-        assert_eq!(cached.digest, DIGEST);
 
         // Create an "updated" response and put it into the cache with the same body
         let response = Response::builder()
@@ -551,7 +541,7 @@ mod test {
         let policy = CachePolicy::new(&request, &response);
 
         let (parts, _) = response.into_parts();
-        storage.put(KEY, &parts, &policy, DIGEST).await.unwrap();
+        storage.put(KEY, &parts, &policy).await.unwrap();
 
         // Lookup the cache entry (should exist with the header)
         let cached = storage.get::<String>(KEY).await.unwrap().unwrap();
@@ -571,7 +561,6 @@ mod test {
             .unwrap()
             .unwrap();
         assert_eq!(data, BODY);
-        assert_eq!(cached.digest, DIGEST);
 
         // Delete the key and ensure it no longer exists
         storage.delete(KEY).await.unwrap();

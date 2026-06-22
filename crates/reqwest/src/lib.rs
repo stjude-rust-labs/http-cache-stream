@@ -33,7 +33,7 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use http_body_util::BodyDataStream;
 pub use http_cache_stream::X_CACHE;
-pub use http_cache_stream::X_CACHE_DIGEST;
+pub use http_cache_stream::X_CACHE_KEY;
 pub use http_cache_stream::X_CACHE_LOOKUP;
 use http_cache_stream::http::Extensions;
 use http_cache_stream::http::Uri;
@@ -183,11 +183,14 @@ impl<S: CacheStorage> reqwest_middleware::Middleware for Cache<S> {
 
 #[cfg(test)]
 mod test {
+    use std::fs::read_to_string;
     use std::sync::Arc;
     use std::sync::Mutex;
 
+    use http_cache_stream::cache_key;
     use http_cache_stream::http;
     use http_cache_stream::storage::DefaultCacheStorage;
+    use reqwest::Method;
     use reqwest::Response;
     use reqwest::StatusCode;
     use reqwest::header;
@@ -248,9 +251,11 @@ mod test {
 
     #[tokio::test]
     async fn no_store() {
+        const URI: &str = "http://test.local";
         const BODY: &str = "hello world!";
-        // Blake3 digest of the body (from https://emn178.github.io/online-tools/blake3/)
-        const DIGEST: &str = "3aa61c409fd7717c9d9c639202af2fae470c0ef669be7ba2caea5779cb534e9d";
+
+        // Determine the expected cache key
+        let key = cache_key(&Method::GET, &URI.parse().unwrap(), &Default::default());
 
         let dir = tempdir().unwrap();
         let cache = Arc::new(Cache::new(DefaultCacheStorage::new(dir.path())));
@@ -270,18 +275,18 @@ mod test {
         );
 
         // Response should not be served from the cache or stored
-        let response = client.get("http://test.local/").send().await.unwrap();
+        let response = client.get(URI).send().await.unwrap();
         assert_eq!(
             response.headers().get(header::CACHE_CONTROL).unwrap(),
             "no-store"
         );
         assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "MISS");
         assert_eq!(response.headers().get(X_CACHE).unwrap(), "MISS");
-        assert!(response.headers().get(X_CACHE_DIGEST).is_none());
+        assert!(response.headers().get(X_CACHE_KEY).is_none());
         assert_eq!(response.text().await.unwrap(), BODY);
 
         // Ensure the body wasn't stored in the cache
-        assert!(!cache.storage().body_path(DIGEST).is_file());
+        assert!(!cache.storage().body_path(&key).is_file());
 
         // Response should *still* not be served from the cache or stored
         let response = client.get("http://test.local/").send().await.unwrap();
@@ -291,18 +296,20 @@ mod test {
         );
         assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "MISS");
         assert_eq!(response.headers().get(X_CACHE).unwrap(), "MISS");
-        assert!(response.headers().get(X_CACHE_DIGEST).is_none());
+        assert!(response.headers().get(X_CACHE_KEY).is_none());
         assert_eq!(response.text().await.unwrap(), BODY);
 
         // Ensure the body wasn't stored in the cache
-        assert!(!cache.storage().body_path(DIGEST).is_file());
+        assert!(!cache.storage().body_path(&key).is_file());
     }
 
     #[tokio::test]
     async fn max_age() {
+        const URI: &str = "http://test.local";
         const BODY: &str = "hello world!";
-        // Blake3 digest of the body (from https://emn178.github.io/online-tools/blake3/)
-        const DIGEST: &str = "3aa61c409fd7717c9d9c639202af2fae470c0ef669be7ba2caea5779cb534e9d";
+
+        // Determine the expected cache key
+        let key = cache_key(&Method::GET, &URI.parse().unwrap(), &Default::default());
 
         let dir = tempdir().unwrap();
         let cache = Arc::new(
@@ -319,18 +326,21 @@ mod test {
         );
 
         // First response should not be served from the cache
-        let response = client.get("http://test.local/").send().await.unwrap();
+        let response = client.get(URI).send().await.unwrap();
         assert_eq!(
             response.headers().get(header::CACHE_CONTROL).unwrap(),
             "max-age=1000"
         );
         assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "MISS");
         assert_eq!(response.headers().get(X_CACHE).unwrap(), "MISS");
-        assert!(response.headers().get(X_CACHE_DIGEST).is_none());
+        assert!(response.headers().get(X_CACHE_KEY).is_none());
         assert_eq!(response.text().await.unwrap(), BODY);
 
         // Ensure the body was stored in the cache
-        assert!(cache.storage().body_path(DIGEST).is_file());
+        assert_eq!(
+            read_to_string(cache.storage().body_path(&key)).unwrap(),
+            BODY
+        );
 
         // Second response should be served from the cache without revalidation
         // If a revalidation is made, the mock middleware will panic since there was
@@ -345,24 +355,30 @@ mod test {
         assert_eq!(
             response
                 .headers()
-                .get(X_CACHE_DIGEST)
+                .get(X_CACHE_KEY)
                 .map(|v| v.to_str().unwrap())
                 .unwrap(),
-            DIGEST
+            key,
         );
         assert_eq!(response.text().await.unwrap(), BODY);
+        assert_eq!(
+            read_to_string(cache.storage().body_path(&key)).unwrap(),
+            BODY
+        );
     }
 
     #[tokio::test]
     async fn cache_hit_unmodified() {
+        const URI: &str = "http://test.local";
         const BODY: &str = "hello world!";
-        // Blake3 digest of the body (from https://emn178.github.io/online-tools/blake3/)
-        const DIGEST: &str = "3aa61c409fd7717c9d9c639202af2fae470c0ef669be7ba2caea5779cb534e9d";
 
         #[derive(Default)]
         struct State {
             revalidated: bool,
         }
+
+        // Determine the expected cache key
+        let key = cache_key(&Method::GET, &URI.parse().unwrap(), &Default::default());
 
         let dir = tempdir().unwrap();
         let state = Arc::new(Mutex::new(State::default()));
@@ -389,11 +405,14 @@ mod test {
         let response = client.get("http://test.local/").send().await.unwrap();
         assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "MISS");
         assert_eq!(response.headers().get(X_CACHE).unwrap(), "MISS");
-        assert!(response.headers().get(X_CACHE_DIGEST).is_none());
+        assert!(response.headers().get(X_CACHE_KEY).is_none());
         assert_eq!(response.text().await.unwrap(), BODY);
 
         // Ensure the body was stored in the cache
-        assert!(cache.storage().body_path(DIGEST).is_file());
+        assert_eq!(
+            read_to_string(cache.storage().body_path(&key)).unwrap(),
+            BODY
+        );
 
         // Assert no revalidation took place
         assert!(!state.lock().unwrap().revalidated);
@@ -405,12 +424,16 @@ mod test {
         assert_eq!(
             response
                 .headers()
-                .get(X_CACHE_DIGEST)
+                .get(X_CACHE_KEY)
                 .map(|v| v.to_str().unwrap())
                 .unwrap(),
-            DIGEST
+            &key
         );
         assert_eq!(response.text().await.unwrap(), BODY);
+        assert_eq!(
+            read_to_string(cache.storage().body_path(&key)).unwrap(),
+            BODY
+        );
 
         // Assert a revalidation took place
         assert!(state.lock().unwrap().revalidated);
@@ -418,18 +441,17 @@ mod test {
 
     #[tokio::test]
     async fn cache_hit_modified() {
+        const URI: &str = "http://test.local";
         const BODY: &str = "hello world!";
         const MODIFIED_BODY: &str = "hello world!!!";
-        // Blake3 digest of the body (from https://emn178.github.io/online-tools/blake3/)
-        const DIGEST: &str = "3aa61c409fd7717c9d9c639202af2fae470c0ef669be7ba2caea5779cb534e9d";
-        // Blake3 digest of the modified body (from https://emn178.github.io/online-tools/blake3/)
-        const MODIFIED_DIGEST: &str =
-            "22b8d362b2e8064356915b1451f630d1d920b427d3b2f9b3432fbf4c03d94184";
 
         #[derive(Default)]
         struct State {
             revalidated: bool,
         }
+
+        // Determine the expected cache key
+        let key = cache_key(&Method::GET, &URI.parse().unwrap(), &Default::default());
 
         let dir = tempdir().unwrap();
         let state = Arc::new(Mutex::new(State::default()));
@@ -457,11 +479,14 @@ mod test {
         let response = client.get("http://test.local/").send().await.unwrap();
         assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "MISS");
         assert_eq!(response.headers().get(X_CACHE).unwrap(), "MISS");
-        assert!(response.headers().get(X_CACHE_DIGEST).is_none());
+        assert!(response.headers().get(X_CACHE_KEY).is_none());
         assert_eq!(response.text().await.unwrap(), BODY);
 
         // Ensure the body was stored in the cache
-        assert!(cache.storage().body_path(DIGEST).is_file());
+        assert_eq!(
+            read_to_string(cache.storage().body_path(&key)).unwrap(),
+            BODY
+        );
 
         // Assert no revalidation took place
         assert!(!state.lock().unwrap().revalidated);
@@ -470,11 +495,14 @@ mod test {
         let response = client.get("http://test.local/").send().await.unwrap();
         assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "HIT");
         assert_eq!(response.headers().get(X_CACHE).unwrap(), "MISS");
-        assert!(response.headers().get(X_CACHE_DIGEST).is_none());
+        assert!(response.headers().get(X_CACHE_KEY).is_none());
         assert_eq!(response.text().await.unwrap(), MODIFIED_BODY);
 
         // Ensure the body was stored in the cache
-        assert!(cache.storage().body_path(MODIFIED_DIGEST).is_file());
+        assert_eq!(
+            read_to_string(cache.storage().body_path(&key)).unwrap(),
+            MODIFIED_BODY
+        );
 
         // Assert a revalidation took place and reset the flag back to false
         assert!(std::mem::take(&mut state.lock().unwrap().revalidated));
@@ -486,12 +514,16 @@ mod test {
         assert_eq!(
             response
                 .headers()
-                .get(X_CACHE_DIGEST)
+                .get(X_CACHE_KEY)
                 .map(|v| v.to_str().unwrap())
                 .unwrap(),
-            MODIFIED_DIGEST
+            &key
         );
         assert_eq!(response.text().await.unwrap(), MODIFIED_BODY);
+        assert_eq!(
+            read_to_string(cache.storage().body_path(&key)).unwrap(),
+            MODIFIED_BODY
+        );
 
         // Assert a revalidation took place
         assert!(state.lock().unwrap().revalidated);
