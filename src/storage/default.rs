@@ -17,10 +17,10 @@ use http::Version;
 use http::response::Parts;
 use http_body::Body;
 use http_cache_semantics::CachePolicy;
+use runtime::remove_file;
 use serde::Deserialize;
 use serde::Serialize;
 use tempfile::TempPath;
-use tokio::fs::remove_file;
 use tracing::debug;
 
 use super::StoredResponse;
