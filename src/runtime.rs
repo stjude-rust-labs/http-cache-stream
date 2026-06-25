@@ -21,10 +21,10 @@ cfg_if::cfg_if! {
         }
     } else if #[cfg(feature = "smol")] {
         pub use smol::fs::File;
+        pub use smol::fs::remove_file;
         pub use smol::io::BufReader;
         pub use smol::io::BufWriter;
         pub use smol::io::AsyncWrite;
-        pub use smol::fs::remove_file;
         pub use smol::unblock as spawn_blocking;
 
         /// Helper for difference in `spawn_blocking` signatures.
