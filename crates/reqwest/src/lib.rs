@@ -289,7 +289,7 @@ mod test {
         assert!(!cache.storage().body_path(&key).is_file());
 
         // Response should *still* not be served from the cache or stored
-        let response = client.get("http://test.local/").send().await.unwrap();
+        let response = client.get(URI).send().await.unwrap();
         assert_eq!(
             response.headers().get(header::CACHE_CONTROL).unwrap(),
             "no-store"
@@ -345,7 +345,7 @@ mod test {
         // Second response should be served from the cache without revalidation
         // If a revalidation is made, the mock middleware will panic since there was
         // only one response defined
-        let response = client.get("http://test.local/").send().await.unwrap();
+        let response = client.get(URI).send().await.unwrap();
         assert_eq!(
             response.headers().get(header::CACHE_CONTROL).unwrap(),
             "max-age=1000"
@@ -402,7 +402,7 @@ mod test {
         );
 
         // First response should be a miss
-        let response = client.get("http://test.local/").send().await.unwrap();
+        let response = client.get(URI).send().await.unwrap();
         assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "MISS");
         assert_eq!(response.headers().get(X_CACHE).unwrap(), "MISS");
         assert!(response.headers().get(X_CACHE_KEY).is_none());
@@ -418,7 +418,7 @@ mod test {
         assert!(!state.lock().unwrap().revalidated);
 
         // Second response should be served from the cache
-        let response = client.get("http://test.local/").send().await.unwrap();
+        let response = client.get(URI).send().await.unwrap();
         assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "HIT");
         assert_eq!(response.headers().get(X_CACHE).unwrap(), "HIT");
         assert_eq!(
@@ -476,7 +476,7 @@ mod test {
         );
 
         // First response should be a miss
-        let response = client.get("http://test.local/").send().await.unwrap();
+        let response = client.get(URI).send().await.unwrap();
         assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "MISS");
         assert_eq!(response.headers().get(X_CACHE).unwrap(), "MISS");
         assert!(response.headers().get(X_CACHE_KEY).is_none());
@@ -492,7 +492,8 @@ mod test {
         assert!(!state.lock().unwrap().revalidated);
 
         // Second response should not be served from the cache (was modified)
-        let response = client.get("http://test.local/").send().await.unwrap();
+        let response = client.get(URI).send().await.unwrap();
+
         assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "HIT");
         assert_eq!(response.headers().get(X_CACHE).unwrap(), "MISS");
         assert!(response.headers().get(X_CACHE_KEY).is_none());
@@ -508,7 +509,8 @@ mod test {
         assert!(std::mem::take(&mut state.lock().unwrap().revalidated));
 
         // Second response should be served from the cache (not modified)
-        let response = client.get("http://test.local/").send().await.unwrap();
+        let response = client.get(URI).send().await.unwrap();
+
         assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "HIT");
         assert_eq!(response.headers().get(X_CACHE).unwrap(), "HIT");
         assert_eq!(
@@ -527,5 +529,55 @@ mod test {
 
         // Assert a revalidation took place
         assert!(state.lock().unwrap().revalidated);
+    }
+
+    #[tokio::test]
+    async fn unsafe_requests() {
+        const URI: &str = "http://test.local";
+        const BODY: &str = "hello world!";
+        const CREATED_BODY: &str = "created!";
+
+        let dir = tempdir().unwrap();
+        let cache = Arc::new(Cache::new(DefaultCacheStorage::new(dir.path())));
+        // Test for both GET and HEAD invalidation after an "unsafe" request
+        for method in &[Method::GET, Method::HEAD] {
+            let mock = Arc::new(MockMiddleware::new([
+                http::Response::builder().body(BODY).unwrap(),
+                http::Response::builder()
+                    .status(StatusCode::CREATED)
+                    .body(CREATED_BODY)
+                    .unwrap(),
+            ]));
+            let client = ClientWithMiddleware::new(
+                Default::default(),
+                vec![cache.clone() as Arc<dyn Middleware>, mock.clone()],
+            );
+
+            // Determine the expected cache key
+            let key = cache_key(method, &URI.parse().unwrap(), &Default::default());
+
+            // First response should be a miss, but the body should be stored
+            let response = client.request(method.clone(), URI).send().await.unwrap();
+            assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "MISS");
+            assert_eq!(response.headers().get(X_CACHE).unwrap(), "MISS");
+            assert!(response.headers().get(X_CACHE_KEY).is_none());
+            assert_eq!(response.text().await.unwrap(), BODY);
+
+            // Ensure the body was stored in the cache
+            assert_eq!(
+                read_to_string(cache.storage().body_path(&key)).unwrap(),
+                BODY
+            );
+
+            // Make an "unsafe" request to the cached URL
+            let response = client.post(URI).send().await.unwrap();
+            assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "MISS");
+            assert_eq!(response.headers().get(X_CACHE).unwrap(), "MISS");
+            assert!(response.headers().get(X_CACHE_KEY).is_none());
+            assert_eq!(response.text().await.unwrap(), CREATED_BODY);
+
+            // Ensure the cached body is now empty (truncated)
+            assert_eq!(read_to_string(cache.storage().body_path(&key)).unwrap(), "");
+        }
     }
 }

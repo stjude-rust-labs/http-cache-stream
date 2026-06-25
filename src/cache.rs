@@ -49,26 +49,45 @@ pub const X_CACHE_KEY: &str = "x-cache-key";
 /// Gets the cache key for a request.
 pub fn cache_key(method: &Method, uri: &Uri, headers: &HeaderMap) -> String {
     let mut hasher = Sha256::new();
+
+    // Hash the method
+    hasher.update(method.as_str().len().to_le_bytes());
     hasher.update(method.as_str());
-    hasher.update(":");
 
+    // Hash the scheme if present
     if let Some(scheme) = uri.scheme_str() {
+        hasher.update(scheme.len().to_le_bytes());
         hasher.update(scheme);
+    } else {
+        hasher.update(0usize.to_le_bytes());
     }
 
-    hasher.update("://");
+    // Hash the authority if present
     if let Some(authority) = uri.authority() {
+        hasher.update(authority.as_str().len().to_le_bytes());
         hasher.update(authority.as_str());
+    } else {
+        hasher.update(0usize.to_le_bytes());
     }
 
+    // Hash the path
+    hasher.update(uri.path().len().to_le_bytes());
     hasher.update(uri.path());
 
+    // Hash the query string if present (note: not normalized)
     if let Some(query) = uri.query() {
+        hasher.update(query.len().to_le_bytes());
         hasher.update(query);
+    } else {
+        hasher.update(0usize.to_le_bytes());
     }
 
+    // Hash the range header if present
     if let Some(value) = headers.get(header::RANGE) {
+        hasher.update(value.as_bytes().len().to_le_bytes());
         hasher.update(value.as_bytes());
+    } else {
+        hasher.update(0usize.to_le_bytes());
     }
 
     let bytes = hasher.finalize();

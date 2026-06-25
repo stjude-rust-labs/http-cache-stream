@@ -13,7 +13,6 @@ cfg_if::cfg_if! {
         pub use tokio::io::BufWriter;
         pub use tokio::io::AsyncWrite;
         pub use tokio::task::spawn_blocking;
-        pub use tokio::fs::remove_file;
 
         /// Helper for difference in `spawn_blocking` signatures.
         pub fn unwrap_task_output<T>(result: Result<T, tokio::task::JoinError>) -> Option<T> {
@@ -21,7 +20,6 @@ cfg_if::cfg_if! {
         }
     } else if #[cfg(feature = "smol")] {
         pub use smol::fs::File;
-        pub use smol::fs::remove_file;
         pub use smol::io::BufReader;
         pub use smol::io::BufWriter;
         pub use smol::io::AsyncWrite;
