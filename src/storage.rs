@@ -20,8 +20,6 @@ pub struct StoredResponse<B: Body> {
     pub response: Response<CacheBody<B>>,
     /// The current cache policy.
     pub policy: CachePolicy,
-    /// The response content digest.
-    pub digest: String,
 }
 
 /// A trait implemented on cache storage.
@@ -37,17 +35,13 @@ pub trait CacheStorage: Send + Sync + 'static {
         key: &str,
     ) -> impl Future<Output = Result<Option<StoredResponse<B>>>> + Send;
 
-    /// Puts a response with an existing content digest into the storage for the
-    /// given response key.
-    ///
-    /// The provided content digest must come from a previous call to
-    /// [`CacheStorage::get`].
+    /// Puts a response with an existing cached response body into the storage
+    /// for the given response key.
     fn put(
         &self,
         key: &str,
         parts: &Parts,
         policy: &CachePolicy,
-        digest: &str,
     ) -> impl Future<Output = Result<()>> + Send;
 
     /// Stores a new response body in the cache.
@@ -66,8 +60,8 @@ pub trait CacheStorage: Send + Sync + 'static {
     /// Deleting an unknown key is not considered an error.
     fn delete(&self, key: &str) -> impl Future<Output = Result<()>> + Send;
 
-    /// Gets the path to a response body for the given content digest.
+    /// Gets the path to a response body for the given cache key.
     ///
     /// This method does not verify the content's existence.
-    fn body_path(&self, digest: &str) -> PathBuf;
+    fn body_path(&self, key: &str) -> PathBuf;
 }
