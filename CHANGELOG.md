@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## 0.5.0 - 07-16-2026
+
+#### Changed
+
+* Changed how cached response bodies are stored; instead of being
+  content-addressed, which required hashing the contents of the file (while
+  streaming), the cached response bodies are now stored by cache key ([#20](https://github.com/stjude-rust-labs/http-cache-stream/pull/20)).
+
 ## 0.4.0 - 02-04-2026
 
 #### Changed
